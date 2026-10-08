@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/main.tsx","./src/theme.ts","./src/vite-env.d.ts","./src/api/batchApi.ts","./src/api/client.ts","./src/auth/AuthContext.tsx","./src/components/BatchDetails.tsx","./src/components/BatchHistory.tsx","./src/components/FileUpload.tsx","./src/components/StatusChip.tsx","./src/pages/DashboardPage.tsx","./src/pages/LoginPage.tsx"],"version":"5.7.3"}

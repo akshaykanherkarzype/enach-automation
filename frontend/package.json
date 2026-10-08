@@ -1,0 +1,32 @@
+{
+  "name": "upi-batch-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.0",
+    "@mui/icons-material": "^6.4.7",
+    "@mui/material": "^6.4.7",
+    "@tanstack/react-query": "^5.67.2",
+    "ag-grid-community": "^33.1.1",
+    "ag-grid-react": "^33.1.1",
+    "axios": "^1.8.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-hook-form": "^7.54.2",
+    "react-router-dom": "^7.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "4.3.4",
+    "typescript": "~5.7.2",
+    "vite": "4.5.9"
+  }
+}

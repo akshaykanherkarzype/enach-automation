@@ -1,0 +1,125 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum BatchModule {
+  INVOICE_GENERATION
+  INVOICE_CHARGE
+}
+
+enum BatchStatus {
+  UPLOADED
+  VALIDATING
+  READY
+  QUEUED
+  PROCESSING
+  COMPLETED
+  PARTIAL_SUCCESS
+  FAILED
+  CANCELLED
+}
+
+enum ItemStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+  RETRYING
+}
+
+model BatchExecution {
+  id               BigInt      @id @default(autoincrement())
+  module           BatchModule
+  status           BatchStatus @default(UPLOADED)
+  uploadedBy       String      @db.VarChar(255)
+  uploadedAt       DateTime    @default(now())
+  startedAt        DateTime?
+  /** IST calendar day (YYYY-MM-DD) the batch started. Invoice calls must stay on this day. */
+  processingDay    String?     @map("processing_day") @db.VarChar(10)
+  completedAt      DateTime?
+  totalRecords     Int         @default(0)
+  successCount     Int         @default(0)
+  failedCount      Int         @default(0)
+  duplicateCount   Int         @default(0)
+  processingCount  Int         @default(0)
+  originalFile     String?     @db.VarChar(1024)
+  processedFile    String?     @db.VarChar(1024)
+  failureReport    String?     @db.VarChar(1024)
+  successReport    String?     @db.VarChar(1024)
+  remarks          String?     @db.Text
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  items BatchExecutionItem[]
+  logs  BatchExecutionLog[]
+
+  @@index([module, status])
+  @@index([module, uploadedAt])
+  @@index([uploadedAt])
+  @@map("batch_execution")
+}
+
+model BatchExecutionItem {
+  id             BigInt     @id @default(autoincrement())
+  batchId        BigInt
+  customerId     String     @db.VarChar(64)
+  amount         Decimal    @db.Decimal(18, 2)
+  status         ItemStatus @default(PENDING)
+  retryCount     Int        @default(0)
+  failureReason  String?    @db.Text
+  responseCode   String?    @db.VarChar(64)
+  responseBody   String?    @db.Text
+  idempotencyKey String     @unique @db.VarChar(128)
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  batch BatchExecution       @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  logs  BatchExecutionLog[]
+
+  @@index([batchId, id])
+  @@index([batchId, status, id])
+  @@index([customerId])
+  @@map("batch_execution_items")
+}
+
+model BatchExecutionLog {
+  id          BigInt   @id @default(autoincrement())
+  batchId     BigInt
+  batchItemId BigInt
+  apiName     String   @db.VarChar(128)
+  request     String?  @db.Text
+  response    String?  @db.Text
+  statusCode  Int?
+  latency     Int?
+  retryNo     Int      @default(0)
+  traceId     String?  @db.VarChar(64)
+  createdAt   DateTime @default(now())
+
+  batch BatchExecution     @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  item  BatchExecutionItem @relation(fields: [batchItemId], references: [id], onDelete: Cascade)
+
+  @@index([batchId, createdAt])
+  @@index([batchItemId])
+  @@index([traceId])
+  @@map("batch_execution_logs")
+}
+
+model AuditLog {
+  id         BigInt   @id @default(autoincrement())
+  action     String   @db.VarChar(64)
+  entityType String   @db.VarChar(64)
+  entityId   String?  @db.VarChar(64)
+  actor      String   @db.VarChar(255)
+  details    String?  @db.Text
+  createdAt  DateTime @default(now())
+
+  @@index([action, createdAt])
+  @@map("audit_logs")
+}
