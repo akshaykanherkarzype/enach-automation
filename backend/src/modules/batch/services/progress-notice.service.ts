@@ -5,7 +5,7 @@ import { logger } from '../../../common/logger/logger.js';
 import { redis } from '../../../infrastructure/redis/client.js';
 import { batchRepository } from '../repositories/batch.repository.js';
 
-export type NoticeEpisode = 'payment' | 'peak';
+export type NoticeEpisode = 'payment' | 'peak' | 'host';
 export type NoticeState = 'down' | 'up' | 'paused' | 'running';
 
 const NOTICE_TTL_SECONDS = 48 * 60 * 60;
@@ -87,9 +87,13 @@ export async function notifyBatchEpisode(input: {
         ? input.next === 'down'
           ? 'payment_paused'
           : 'payment_resumed'
-        : input.next === 'paused'
-          ? 'peak_paused'
-          : 'peak_resumed';
+        : input.episode === 'host'
+          ? input.next === 'paused'
+            ? 'host_paused'
+            : 'host_resumed'
+          : input.next === 'paused'
+            ? 'peak_paused'
+            : 'peak_resumed';
 
     await emailClient.sendBatchProgress({
       to: input.uploadedBy,

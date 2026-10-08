@@ -123,6 +123,21 @@ test('progress notices are sent once per outage or peak window and show remainin
   });
   assert.match(afterPeak.subject, /Resumed — peak hours ended/);
   assert.match(afterPeak.text, /peak window has ended/);
+
+  const host = buildProgressMail({
+    to: 'ops@getzype.com',
+    module: 'INVOICE_CHARGE',
+    batchId: '9',
+    kind: 'host_paused',
+    total: 50000,
+    success: 1000,
+    failed: 2,
+    remaining: 48998,
+    cause: 'memory 91%, cpu 92%',
+  });
+  assert.match(host.subject, /Paused — host under pressure/);
+  assert.match(host.text, /Signal: memory 91%, cpu 92%/);
+  assert.match(host.text, /not marked failed/);
 });
 
 test('completion mail skips the local admin login', () => {

@@ -5,6 +5,7 @@ import { API_NAMES } from '../../../common/constants/index.js';
 import { logger } from '../../../common/logger/logger.js';
 import { batchAnchorDay } from '../../../common/time/ist.js';
 import { toJsonSafe } from '../../../common/utils/parse-size.js';
+import { currentPressure, HOST_PRESSURE_DEFER_MS } from '../../../infrastructure/payment/host-pressure.js';
 import { buildSingleCustomerPayload } from '../../../infrastructure/payment/payload.js';
 import { paymentClient } from '../../../infrastructure/payment/index.js';
 import type { PaymentResponse } from '../../../infrastructure/payment/types.js';
@@ -50,7 +51,7 @@ async function notifyProgress(input: {
   module: BatchModule;
   uploadedBy: string;
   total: number;
-  episode: 'payment' | 'peak';
+  episode: 'payment' | 'peak' | 'host';
   next: 'down' | 'up' | 'paused' | 'running';
   cause?: string;
   resumesAt?: Date;
@@ -113,7 +114,7 @@ export async function processBatchItem(
     // the previous day's invoices, so a batch may continue after midnight.
     const enforceSameDay = false;
 
-    const before = planBeforeCall({
+    let before = planBeforeCall({
       now,
       module,
       anchorDay,
@@ -122,6 +123,17 @@ export async function processBatchItem(
       peakWindows: env.peakWindows,
       dayEndBufferMs: env.INVOICE_DAY_END_BUFFER_MS,
     });
+
+    if (before.action === 'call' && remoteGuards) {
+      const pressure = await currentPressure(now.getTime());
+      if (pressure.level === 'pause') {
+        before = {
+          action: 'defer',
+          delayMs: HOST_PRESSURE_DEFER_MS,
+          reason: 'HOST_PRESSURE',
+        };
+      }
+    }
 
     if (before.action === 'defer') {
       await batchRepository.updateItem(itemId, { status: waitingStatus(item.retryCount) });
@@ -142,6 +154,18 @@ export async function processBatchItem(
           resumesAt: new Date(now.getTime() + before.delayMs),
         });
       }
+      if (before.reason === 'HOST_PRESSURE') {
+        const pressure = await currentPressure(now.getTime());
+        await notifyProgress({
+          batchId: item.batchId,
+          module,
+          uploadedBy: item.batch.uploadedBy,
+          total: item.batch.totalRecords,
+          episode: 'host',
+          next: 'paused',
+          cause: pressure.reasons.join(', '),
+        });
+      }
       scheduleBatchChanged(item.batchId);
       return;
     }
@@ -153,6 +177,14 @@ export async function processBatchItem(
         uploadedBy: item.batch.uploadedBy,
         total: item.batch.totalRecords,
         episode: 'peak',
+        next: 'running',
+      });
+      await notifyProgress({
+        batchId: item.batchId,
+        module,
+        uploadedBy: item.batch.uploadedBy,
+        total: item.batch.totalRecords,
+        episode: 'host',
         next: 'running',
       });
     }

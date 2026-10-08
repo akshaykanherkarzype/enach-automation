@@ -62,6 +62,21 @@ Set these in `backend/.env` in this order. Restart the worker after a change. Th
 
 `PAYMENT_ADAPTIVE=true` (the default) shares one pace across workers. The first calls learn a normal response time. When the moving average stays at least twice that normal, in-flight calls are cut in half and the gap doubles. At four times normal, only one call runs and the gap opens to its widest: the larger of 2 seconds and 16 times `PAYMENT_REQUEST_GAP_MS`, and never more than 10 seconds. With the current 125ms gap that widest pause is 2 seconds. When response time comes back, one call is added every 20 seconds until the ceiling of 8 is reached. `PAYMENT_ADAPTIVE=false` keeps 8 in flight and the 125ms gap fixed.
 
+## Host pressure
+
+The worker reads the same host gauges as the PM2 dashboard for `respo-prod`: system memory, root disk, and system CPU. It also reads payment-service `GET /payment-service/api/v2/metrics` for the process event-loop lag (`payment_service_nodejs_eventloop_lag_p99_seconds`). That scrape does not include host disk or system CPU, so those stay on the dashboard's Prometheus source.
+
+Samples are shared through Redis and refreshed about every 15 seconds. A failed scrape keeps the last sample for two minutes, then leaves the pace unchanged so a monitoring outage does not stop the batch.
+
+| Signal | Slow the batch | Pause calls |
+| --- | --- | --- |
+| Memory | 80% | 90% |
+| Disk | 85% | 92% |
+| CPU | 75% | 90% |
+| Event-loop lag | 250ms | 1s |
+
+Slow cuts in-flight calls to half the ceiling (4 when the ceiling is 8) and opens the gap to at least 500ms. Pause queues each customer again after 30 seconds and does not use a retry. Calls resume on their own when every signal is back under the slow line. One email is sent when the pause starts, and one when it clears. Set `HOST_PRESSURE=false` to keep the normal pace. The current board (about 57% memory, 28% disk, 32% CPU) is under these lines, so it does not slow or pause.
+
 Calls per second is the smaller of:
 
 - `1000 / PAYMENT_REQUEST_GAP_MS`

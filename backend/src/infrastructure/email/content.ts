@@ -300,7 +300,9 @@ export type ProgressNoticeKind =
   | 'payment_paused'
   | 'payment_resumed'
   | 'peak_paused'
-  | 'peak_resumed';
+  | 'peak_resumed'
+  | 'host_paused'
+  | 'host_resumed';
 
 export interface BatchProgressEmail {
   to: string;
@@ -392,6 +394,38 @@ function progressCopy(payload: BatchProgressEmail): ProgressCopy {
         intro:
           'The peak window has ended. Calls have resumed for the customers still waiting.',
         next: 'This notice is sent once for this window. The completion report is sent when the batch finishes.',
+      };
+    case 'host_paused':
+      return {
+        subjectEvent: 'Paused — host under pressure',
+        badge: 'Host pressure',
+        title: `${label} is paused`,
+        tone: {
+          label: 'Paused',
+          color: '#9a6700',
+          background: '#fff6e0',
+          accent: '#C2410C',
+          intro: '',
+        },
+        intro:
+          'New payment calls are held because the payment host is above its memory, disk, CPU, or event-loop limit. Customers already accepted are unchanged, and waiting customers are not marked failed.',
+        next: 'This notice is sent once for this pause. Calls are checked again shortly and resume on their own when the host is back in range. A separate email is sent when processing resumes.',
+      };
+    case 'host_resumed':
+      return {
+        subjectEvent: 'Resumed — host pressure cleared',
+        badge: 'Host recovered',
+        title: `${label} has resumed`,
+        tone: {
+          label: 'Resumed',
+          color: '#0f6b4c',
+          background: '#e8f6ef',
+          accent: '#0A6B4E',
+          intro: '',
+        },
+        intro:
+          'Memory, disk, CPU, and the payment-service event loop are back in range. Calls have resumed for the customers still waiting.',
+        next: 'This notice is sent once for this recovery. The completion report is sent when the batch finishes.',
       };
   }
 }
@@ -508,7 +542,7 @@ export function buildProgressMail(
           <tr>
             <td style="padding:22px 32px 28px 32px;">
               <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:1.6;color:#5b7168;">
-                This is an internal operations notice from the UPI batch platform. It is sent once per outage or peak window, not once per customer. Please do not reply to this email.
+                This is an internal operations notice from the UPI batch platform. It is sent once per pause, not once per customer. Please do not reply to this email.
               </p>
             </td>
           </tr>

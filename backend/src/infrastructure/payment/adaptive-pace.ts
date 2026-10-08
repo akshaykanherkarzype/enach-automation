@@ -1,6 +1,7 @@
 import { env } from '../../common/config/env.js';
 import { logger } from '../../common/logger/logger.js';
 import { redis } from '../redis/client.js';
+import { applyPressureToBudget, currentPressure } from './host-pressure.js';
 
 const STATE_KEY = 'lock:payment:pace';
 const RATE_HOLD_KEY = 'lock:payment:rate-hold';
@@ -158,7 +159,7 @@ export async function noteRateLimited(delayMs: number): Promise<void> {
   }
 }
 
-export async function loadPaceBudget(): Promise<PaceBudget> {
+async function selectPaceBudget(): Promise<PaceBudget> {
   const config = adaptiveConfigFromEnv();
   const fallback = configuredBudget(config);
   try {
@@ -180,6 +181,18 @@ export async function loadPaceBudget(): Promise<PaceBudget> {
   } catch (err) {
     logger.warn({ err }, 'Payment pace state unavailable; using the configured cap');
     return fallback;
+  }
+}
+
+export async function loadPaceBudget(): Promise<PaceBudget> {
+  const budget = await selectPaceBudget();
+  if (!env.hostPressure || env.PAYMENT_CLIENT !== 'http') return budget;
+  try {
+    const pressure = await currentPressure();
+    return applyPressureToBudget(budget, pressure.level, adaptiveConfigFromEnv());
+  } catch (err) {
+    logger.warn({ err }, 'Host pressure did not change the pace');
+    return budget;
   }
 }
 

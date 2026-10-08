@@ -76,6 +76,22 @@ const envSchema = z.object({
     .string()
     .optional()
     .transform((v) => v === undefined || v === '' || v === 'true' || v === '1'),
+  HOST_PRESSURE: z
+    .string()
+    .optional()
+    .transform((v) => v === undefined || v === '' || v === 'true' || v === '1'),
+  GRAFANA_PROMETHEUS_URL: z
+    .string()
+    .default('https://monitoring.respo.co.in/api/datasources/proxy/uid/ef4nzsqdakgsge'),
+  HOST_METRICS_INSTANCE: z.string().default('respo-prod'),
+  HOST_MEM_SLOW: z.coerce.number().min(1).max(100).default(80),
+  HOST_MEM_PAUSE: z.coerce.number().min(1).max(100).default(90),
+  HOST_DISK_SLOW: z.coerce.number().min(1).max(100).default(85),
+  HOST_DISK_PAUSE: z.coerce.number().min(1).max(100).default(92),
+  HOST_CPU_SLOW: z.coerce.number().min(1).max(100).default(75),
+  HOST_CPU_PAUSE: z.coerce.number().min(1).max(100).default(90),
+  HOST_EVENT_LOOP_SLOW_MS: z.coerce.number().min(1).default(250),
+  HOST_EVENT_LOOP_PAUSE_MS: z.coerce.number().min(1).default(1_000),
   PAYMENT_SLOT_WAIT_MS: z.coerce.number().min(1000).default(600_000),
   PAYMENT_CALL_BUDGET_MS: z.coerce.number().min(0).default(2500),
   PEAK_WINDOWS_IST: z.string().default('10:00-13:00,17:00-22:00'),
@@ -134,6 +150,7 @@ export const env = {
   peakWindows,
   invoiceSameDayGuard: Boolean(raw.INVOICE_SAME_DAY_GUARD),
   paymentAdaptive: Boolean(raw.PAYMENT_ADAPTIVE),
+  hostPressure: Boolean(raw.HOST_PRESSURE),
 };
 
 export type Env = typeof env;
