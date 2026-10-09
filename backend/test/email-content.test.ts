@@ -30,9 +30,11 @@ test('completion mail describes the UPI result and attaches failures', () => {
   assert.match(invoice.html, /Invoice Generation/);
   assert.match(invoice.html, /Partial success/);
   assert.match(invoice.html, /batch_42_failed\.csv/);
+  assert.match(invoice.text, /every failed customer/);
   assert.match(invoice.html, />\s*2\s*</);
   assert.equal(invoice.attachments.length, 1);
   assert.equal(invoice.attachments[0].filename, 'batch_42_failed.csv');
+  assert.equal(invoice.attachments[0].content.toString(), base.failedCsv.toString());
   assert.equal(invoice.attachments[0].contentType, 'text/csv');
 
   const charge = buildCompletionMail({
@@ -49,6 +51,76 @@ test('completion mail describes the UPI result and attaches failures', () => {
   assert.match(charge.html, /Completed/);
   assert.match(charge.html, /No failures/);
   assert.equal(charge.attachments.length, 0);
+});
+
+test('a start notice says how many customers were queued', () => {
+  const started = buildProgressMail({
+    to: 'ops@getzype.com',
+    module: 'INVOICE_GENERATION',
+    batchId: '15',
+    kind: 'started',
+    total: 50000,
+    success: 0,
+    failed: 0,
+    remaining: 50000,
+    duplicates: 12,
+    invalid: 3,
+    filename: 'customers.csv',
+  });
+  assert.match(started.subject, /Started — Invoice Generation #15/);
+  assert.match(started.text, /started for 50,000 customers/);
+  assert.match(started.text, /Duplicates skipped: 12/);
+  assert.match(started.text, /Invalid rows: 3/);
+  assert.match(started.text, /File: customers.csv/);
+  assert.match(started.html, /Queued/);
+  assert.equal(started.attachments.length, 0);
+
+  const traced = buildProgressMail({
+    to: 'ops@getzype.com',
+    module: 'INVOICE_CHARGE',
+    batchId: '15',
+    kind: 'payment_paused',
+    total: 1000,
+    success: 10,
+    failed: 0,
+    remaining: 990,
+    cause: 'HTTP_502',
+    customerId: '10188945',
+    responseCode: 'HTTP_502',
+    traceId: 'trace-abc',
+  });
+  assert.match(traced.text, /Trace ID: trace-abc/);
+  assert.match(traced.text, /Customer: 10188945/);
+  assert.match(traced.html, /trace-abc/);
+
+  const finished = buildCompletionMail({
+    ...base,
+    module: 'INVOICE_GENERATION',
+    processingDay: '2026-10-09',
+    requestedBy: 'ops@getzype.com',
+    failed: 8,
+    failures: [
+      {
+        customerId: '10188945',
+        responseCode: 'CANNOT_CHARGE_SUBSCRIPTION_PLAN',
+        traceId: 'trace-fail-1',
+        reason: 'CANNOT_CHARGE_SUBSCRIPTION_PLAN',
+        status: 'FAILED',
+        invoiceId: 'INV-1',
+        orderId: 'ORD-1',
+      },
+    ],
+  });
+  assert.match(finished.text, /Processing day: 2026-10-09 IST/);
+  assert.match(finished.text, /trace-fail-1/);
+  assert.match(finished.text, /INV-1/);
+  assert.match(finished.text, /ORD-1/);
+  assert.match(finished.text, /every failed customer is in the attachment/);
+  assert.match(finished.text, /7 more in the attachment/);
+  assert.match(finished.html, /Sample failures/);
+  assert.match(finished.html, /trace-fail-1/);
+  assert.match(finished.html, /7 more in the attached file/);
+  assert.equal(finished.html.split('trace-fail-1').length - 1, 1);
 });
 
 test('progress notices are sent once per outage or peak window and show remaining work', () => {

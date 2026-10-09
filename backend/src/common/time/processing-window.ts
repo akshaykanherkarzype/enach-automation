@@ -58,8 +58,8 @@ export type InvoiceGate =
   | { ok: false; reason: string };
 
 /**
- * Kept for tests. The UPI invoice route does not cancel previous invoices, so the
- * worker does not apply this gate.
+ * Invoice generation for a batch stays on its IST processing day.
+ * A queue message that arrives the next day, or inside the midnight buffer, is refused.
  */
 export function invoiceCallGate(
   now: Date,
@@ -72,7 +72,7 @@ export function invoiceCallGate(
       ok: false,
       reason:
         `INVOICE_DAY_CHANGED anchor=${anchorDay} today=${today}. ` +
-        'Refused to call createInvoice because a new IST day cancels the previous day unpaid invoices.',
+        `This invoice batch belongs to ${anchorDay} IST and was not sent on ${today}.`,
     };
   }
 
@@ -82,7 +82,7 @@ export function invoiceCallGate(
       ok: false,
       reason:
         `INVOICE_DAY_END_BUFFER ${dayEndBufferMs}ms. ` +
-        'Refused to call createInvoice near IST midnight so the request cannot land on the next day.',
+        'Refused near IST midnight so an invoice call cannot land on the next day.',
     };
   }
 

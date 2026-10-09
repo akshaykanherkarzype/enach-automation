@@ -5,6 +5,7 @@ import { API_NAMES } from '../../../common/constants/index.js';
 import { logger } from '../../../common/logger/logger.js';
 import { batchAnchorDay } from '../../../common/time/ist.js';
 import { toJsonSafe } from '../../../common/utils/parse-size.js';
+import { paymentResultRecord } from '../../../infrastructure/payment/retry-policy.js';
 import { currentPressure, HOST_PRESSURE_DEFER_MS } from '../../../infrastructure/payment/host-pressure.js';
 import { buildSingleCustomerPayload } from '../../../infrastructure/payment/payload.js';
 import { paymentClient } from '../../../infrastructure/payment/index.js';
@@ -55,6 +56,9 @@ async function notifyProgress(input: {
   next: 'down' | 'up' | 'paused' | 'running';
   cause?: string;
   resumesAt?: Date;
+  customerId?: string;
+  responseCode?: string;
+  traceId?: string;
 }): Promise<void> {
   await notifyBatchEpisode(input);
 }
@@ -110,9 +114,9 @@ export async function processBatchItem(
     const now = new Date();
     const anchorDay = batchAnchorDay(item.batch.processingDay, item.batch.startedAt, now);
     const remoteGuards = env.PAYMENT_CLIENT === 'http';
-    // The UPI invoice route returns an existing unpaid invoice. It does not cancel
-    // the previous day's invoices, so a batch may continue after midnight.
-    const enforceSameDay = false;
+    // Invoice generation is only sent on the batch's IST day. A message that
+    // surfaces tomorrow is failed and is not sent to payment-service.
+    const enforceSameDay = remoteGuards && env.invoiceSameDayGuard;
 
     let before = planBeforeCall({
       now,
@@ -244,11 +248,7 @@ export async function processBatchItem(
           body: requestBody ?? { customerId: item.customerId, amount: Number(item.amount) },
           idempotencyKey: item.idempotencyKey,
         }),
-        response: toJsonSafe({
-          status: response.body.status,
-          message: response.body.message,
-          responseCode: response.responseCode,
-        }),
+        response: toJsonSafe(paymentResultRecord(response.body)),
         statusCode: response.statusCode,
         latency: response.latencyMs,
         retryNo,
@@ -274,7 +274,7 @@ export async function processBatchItem(
       await batchRepository.updateItem(itemId, {
         status: 'SUCCESS',
         responseCode: response.responseCode,
-        responseBody: toJsonSafe(response.body),
+        responseBody: toJsonSafe(paymentResultRecord(response.body)),
         completedAt: new Date(),
         failureReason: null,
       });
@@ -287,6 +287,9 @@ export async function processBatchItem(
           total: item.batch.totalRecords,
           episode: 'payment',
           next: 'up',
+          customerId: item.customerId,
+          responseCode: response.responseCode,
+          traceId,
         });
       }
       scheduleBatchChanged(item.batchId, await batchService.finalizeIfComplete(item.batchId));
@@ -311,6 +314,9 @@ export async function processBatchItem(
           episode: 'payment',
           next: 'down',
           cause,
+          customerId: item.customerId,
+          responseCode: response.responseCode,
+          traceId,
         });
       } else if (remoteGuards && paymentServiceAnswered(response)) {
         await notifyProgress({
@@ -320,6 +326,9 @@ export async function processBatchItem(
           total: item.batch.totalRecords,
           episode: 'payment',
           next: 'up',
+          customerId: item.customerId,
+          responseCode: response.responseCode,
+          traceId,
         });
       }
       scheduleBatchChanged(item.batchId);
@@ -333,7 +342,7 @@ export async function processBatchItem(
         retryCount: nextRetry,
         failureReason: after.reason,
         responseCode: response.responseCode,
-        responseBody: toJsonSafe(response.body),
+        responseBody: toJsonSafe(paymentResultRecord(response.body)),
       });
       retryCounter.inc({ module });
       await batchService.requeueItem(itemId, after.delayMs, module);
@@ -350,6 +359,9 @@ export async function processBatchItem(
           total: item.batch.totalRecords,
           episode: 'payment',
           next: 'up',
+          customerId: item.customerId,
+          responseCode: response.responseCode,
+          traceId,
         });
       }
       scheduleBatchChanged(item.batchId);
@@ -364,6 +376,9 @@ export async function processBatchItem(
         total: item.batch.totalRecords,
         episode: 'payment',
         next: 'up',
+        customerId: item.customerId,
+        responseCode: response.responseCode,
+        traceId,
       });
     }
 
@@ -388,7 +403,7 @@ async function failItem(
     retryCount,
     failureReason: reason,
     responseCode: response?.responseCode,
-    responseBody: response ? toJsonSafe(response.body) : undefined,
+    responseBody: response ? toJsonSafe(paymentResultRecord(response.body)) : undefined,
     completedAt: new Date(),
   });
 

@@ -11,6 +11,17 @@ export interface BatchCompletionEmail {
   executionTimeMs: number;
   failedCsv?: Buffer;
   status: string;
+  processingDay?: string;
+  requestedBy?: string;
+  failures?: Array<{
+    customerId: string;
+    responseCode: string;
+    traceId: string;
+    reason: string;
+    status?: string;
+    invoiceId?: string;
+    orderId?: string;
+  }>;
 }
 
 export interface CompletionMail {
@@ -134,9 +145,8 @@ function successNote(module: string): string {
 }
 
 function attachmentNote(payload: BatchCompletionEmail, filename: string): string {
-  return payload.failed > 0
-    ? `failed.csv is attached as ${filename} with customer-level failure reasons.`
-    : 'No failed records for this batch.';
+  if (payload.failed <= 0) return 'No failed records for this batch.';
+  return `${filename} is attached and lists every failed customer, with status, failure reason, invoice id, order id, and trace ID. The sample below shows only the first few.`;
 }
 
 function metricCell(label: string, value: string, color: string): string {
@@ -246,6 +256,8 @@ function buildHtml(input: {
                 ${detailRow('Module', label, true)}
                 ${detailRow('Batch ID', payload.batchId, false)}
                 ${detailRow('Status', tone.label, true)}
+                ${payload.processingDay ? detailRow('Processing day', `${payload.processingDay} IST`, false) : ''}
+                ${payload.requestedBy ? detailRow('Requested by', payload.requestedBy, true) : ''}
                 ${detailRow('Acceptance rate', accepted, false)}
                 ${detailRow('Execution time', duration, true)}
                 ${detailRow('Completed', generatedAt, false)}
@@ -263,6 +275,7 @@ function buildHtml(input: {
               </table>
             </td>
           </tr>
+          ${failureSampleHtml(payload)}
           <tr>
             <td style="padding:14px 32px 8px 32px;">
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:${payload.failed > 0 ? '#fff6e0' : '#e8f6ef'};border-radius:8px;">
@@ -297,6 +310,7 @@ function buildHtml(input: {
 }
 
 export type ProgressNoticeKind =
+  | 'started'
   | 'payment_paused'
   | 'payment_resumed'
   | 'peak_paused'
@@ -317,6 +331,17 @@ export interface BatchProgressEmail {
   cause?: string;
   /** When a peak pause is scheduled to lift. */
   resumesAt?: string;
+  /** Rows skipped before the file was queued. */
+  duplicates?: number;
+  invalid?: number;
+  filename?: string;
+  processingDay?: string;
+  queue?: string;
+  requestedBy?: string;
+  /** The payment call that triggered this notice. */
+  customerId?: string;
+  responseCode?: string;
+  traceId?: string;
 }
 
 interface ProgressCopy {
@@ -330,7 +355,23 @@ interface ProgressCopy {
 
 function progressCopy(payload: BatchProgressEmail): ProgressCopy {
   const label = moduleLabel(payload.module);
+  const customers = formatCount(payload.total);
   switch (payload.kind) {
+    case 'started':
+      return {
+        subjectEvent: 'Started',
+        badge: 'Started',
+        title: `${label} has started`,
+        tone: {
+          label: 'Started',
+          color: '#0f6b4c',
+          background: '#e8f6ef',
+          accent: '#0A6B4E',
+          intro: '',
+        },
+        intro: `${label} has started for ${customers} customers. They are on the queue and payment calls are beginning.`,
+        next: 'This notice is sent once when the file is confirmed. A later email is sent if calls pause, when they resume, and when the batch finishes.',
+      };
     case 'payment_paused':
       return {
         subjectEvent: 'Paused — payment-service unavailable',
@@ -439,18 +480,30 @@ export function buildProgressMail(
   const generatedAt = formatIstTimestamp(now);
   const cause = payload.cause?.trim();
   const resumesAt = payload.resumesAt?.trim();
+  const filename = payload.filename?.trim();
+  const started = payload.kind === 'started';
   const subject = `[UPI Batch] ${copy.subjectEvent} — ${label} #${payload.batchId}`;
 
   const lines = [
-    'UPI Batch progress notice',
+    started ? 'UPI Batch started' : 'UPI Batch progress notice',
     '',
     `Module: ${label}`,
     `Batch ID: ${payload.batchId}`,
     `Event: ${copy.badge}`,
+    ...(filename ? [`File: ${filename}`] : []),
+    ...(payload.processingDay ? [`Processing day: ${payload.processingDay} IST`] : []),
+    ...(payload.queue ? [`Queue: ${payload.queue}`] : []),
+    ...(payload.requestedBy ? [`Requested by: ${payload.requestedBy}`] : []),
+    ...(payload.customerId ? [`Customer: ${payload.customerId}`] : []),
+    ...(payload.responseCode ? [`Response code: ${payload.responseCode}`] : []),
+    ...(payload.traceId ? [`Trace ID: ${payload.traceId}`] : []),
     `Total: ${payload.total}`,
-    `Accepted: ${payload.success}`,
-    `Failed: ${payload.failed}`,
-    `Remaining: ${payload.remaining}`,
+    ...(started
+      ? [
+          `Duplicates skipped: ${payload.duplicates ?? 0}`,
+          `Invalid rows: ${payload.invalid ?? 0}`,
+        ]
+      : [`Accepted: ${payload.success}`, `Failed: ${payload.failed}`, `Remaining: ${payload.remaining}`]),
     ...(cause ? [`Signal: ${cause}`] : []),
     ...(resumesAt ? [`Resumes: ${resumesAt}`] : []),
     `Reported: ${generatedAt}`,
@@ -505,10 +558,17 @@ export function buildProgressMail(
             <td style="padding:22px 26px 8px 26px;">
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
                 <tr>
-                  ${metricCell('Total', formatCount(payload.total), '#12261e')}
+                  ${
+                    started
+                      ? `${metricCell('Customers', formatCount(payload.total), '#0A6B4E')}
+                  ${metricCell('Duplicates', formatCount(payload.duplicates ?? 0), '#12261e')}
+                  ${metricCell('Invalid', formatCount(payload.invalid ?? 0), (payload.invalid ?? 0) > 0 ? '#9b1c1c' : '#12261e')}
+                  ${metricCell('Queued', formatCount(payload.total), '#12261e')}`
+                      : `${metricCell('Total', formatCount(payload.total), '#12261e')}
                   ${metricCell('Accepted', formatCount(payload.success), '#0A6B4E')}
                   ${metricCell('Failed', formatCount(payload.failed), payload.failed > 0 ? '#9b1c1c' : '#12261e')}
-                  ${metricCell('Remaining', formatCount(payload.remaining), '#12261e')}
+                  ${metricCell('Remaining', formatCount(payload.remaining), '#12261e')}`
+                  }
                 </tr>
               </table>
             </td>
@@ -521,7 +581,14 @@ export function buildProgressMail(
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #e2ebe6;border-radius:8px;">
                 ${detailRow('Module', label, true)}
                 ${detailRow('Batch ID', payload.batchId, false)}
-                ${detailRow('Event', copy.badge, true)}
+                ${filename ? detailRow('File', filename, true) : ''}
+                ${payload.processingDay ? detailRow('Processing day', `${payload.processingDay} IST`, false) : ''}
+                ${payload.queue ? detailRow('Queue', payload.queue, true) : ''}
+                ${payload.requestedBy ? detailRow('Requested by', payload.requestedBy, false) : ''}
+                ${payload.customerId ? detailRow('Customer', payload.customerId, true) : ''}
+                ${payload.responseCode ? detailRow('Response code', payload.responseCode, false) : ''}
+                ${payload.traceId ? detailRow('Trace ID', payload.traceId, true) : ''}
+                ${detailRow('Event', copy.badge, !filename)}
                 ${cause ? detailRow('Signal', cause, false) : ''}
                 ${resumesAt ? detailRow('Resumes', resumesAt, Boolean(cause)) : ''}
                 ${detailRow('Reported', generatedAt, true)}
@@ -542,7 +609,7 @@ export function buildProgressMail(
           <tr>
             <td style="padding:22px 32px 28px 32px;">
               <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:1.6;color:#5b7168;">
-                This is an internal operations notice from the UPI batch platform. It is sent once per pause, not once per customer. Please do not reply to this email.
+                This is an internal operations notice from the UPI batch platform. It is sent once when the file is confirmed or once per pause, not once per customer. Please do not reply to this email.
               </p>
             </td>
           </tr>
@@ -566,6 +633,65 @@ export function buildProgressMail(
   };
 }
 
+function failureLines(payload: BatchCompletionEmail): string[] {
+  const rows = payload.failures ?? [];
+  if (!rows.length) return [];
+  const lines = ['', 'Sample failures (every failed customer is in the attachment):'];
+  for (const row of rows) {
+    const trace = row.traceId || 'no trace yet';
+    const invoice = row.invoiceId ? ` invoice ${row.invoiceId}` : '';
+    const order = row.orderId ? ` order ${row.orderId}` : '';
+    lines.push(
+      `- ${row.customerId}  ${row.status || 'FAILED'}  ${row.responseCode || 'NO_CODE'}  ${row.reason}${invoice}${order}  ${trace}`,
+    );
+  }
+  if (payload.failed > rows.length) {
+    lines.push(`- and ${payload.failed - rows.length} more in the attachment`);
+  }
+  return lines;
+}
+
+function failureSampleHtml(payload: BatchCompletionEmail): string {
+  const rows = payload.failures ?? [];
+  if (!rows.length) return '';
+  const body = rows
+    .map(
+      (row) => `
+                <tr>
+                  <td style="padding:8px 10px;font-family:Consolas,Menlo,monospace;font-size:12px;color:#12261e;border-bottom:1px solid #e2ebe6;">${escapeHtml(row.customerId)}</td>
+                  <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#12261e;border-bottom:1px solid #e2ebe6;">${escapeHtml(row.status || 'FAILED')}</td>
+                  <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#12261e;border-bottom:1px solid #e2ebe6;">${escapeHtml(row.reason)}</td>
+                  <td style="padding:8px 10px;font-family:Consolas,Menlo,monospace;font-size:11px;color:#3f564c;border-bottom:1px solid #e2ebe6;">${escapeHtml(row.invoiceId || '—')}</td>
+                  <td style="padding:8px 10px;font-family:Consolas,Menlo,monospace;font-size:11px;color:#3f564c;border-bottom:1px solid #e2ebe6;">${escapeHtml(row.orderId || '—')}</td>
+                  <td style="padding:8px 10px;font-family:Consolas,Menlo,monospace;font-size:11px;color:#3f564c;border-bottom:1px solid #e2ebe6;">${escapeHtml(row.traceId || '—')}</td>
+                </tr>`,
+    )
+    .join('');
+  const more =
+    payload.failed > rows.length
+      ? `<div style="margin-top:8px;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#5b7168;">And ${escapeHtml(payload.failed - rows.length)} more in the attached file.</div>`
+      : '';
+  return `
+          <tr>
+            <td style="padding:18px 32px 0 32px;">
+              <div style="font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:#5b7168;margin-bottom:10px;">
+                Sample failures
+              </div>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #e2ebe6;border-radius:8px;">
+                <tr>
+                  <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#5b7168;border-bottom:1px solid #e2ebe6;">Customer</td>
+                  <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#5b7168;border-bottom:1px solid #e2ebe6;">Status</td>
+                  <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#5b7168;border-bottom:1px solid #e2ebe6;">Reason</td>
+                  <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#5b7168;border-bottom:1px solid #e2ebe6;">Invoice</td>
+                  <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#5b7168;border-bottom:1px solid #e2ebe6;">Order</td>
+                  <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#5b7168;border-bottom:1px solid #e2ebe6;">Trace ID</td>
+                </tr>
+                ${body}
+              </table>
+              ${more}
+            </td>
+          </tr>`;
+}
 export function buildCompletionMail(
   payload: BatchCompletionEmail,
   now: Date = new Date(),
@@ -589,12 +715,15 @@ export function buildCompletionMail(
     `Success: ${payload.success}`,
     `Failed: ${payload.failed}`,
     `Duplicates: ${payload.duplicates}`,
+    ...(payload.processingDay ? [`Processing day: ${payload.processingDay} IST`] : []),
+    ...(payload.requestedBy ? [`Requested by: ${payload.requestedBy}`] : []),
     `Execution time: ${duration}`,
     `Completed: ${generatedAt}`,
     '',
     note,
     '',
     attachment,
+    ...failureLines(payload),
   ];
 
   const attachments =

@@ -6,6 +6,7 @@ import type { BatchModuleSlug, ValidationSummary } from '../api/batchApi';
 import { confirmUpload, uploadFile } from '../api/batchApi';
 import { useAuth } from '../auth/AuthContext';
 import { apiMessage, formatCount, isBatchLive } from '../lib/batch';
+import { CopyableText } from './CopyableText';
 import { useBatchList } from './BatchHistory';
 
 interface Props {
@@ -128,7 +129,7 @@ export function FileUpload({ module, onBatchCreated }: Props) {
             <Chip size="small" label={summary.originalFilename} variant="outlined" />
           </Stack>
           <Box className="stat-row">
-            <Stat label="Rows" value={summary.totalRecords} />
+            <Stat label="Total records" value={summary.totalRecords} />
             <Stat label="Will run" value={summary.validRecords} tone="success" />
             <Stat label="Duplicates" value={summary.duplicateCount} />
             <Stat label="Invalid" value={summary.invalidCount} tone={summary.invalidCount ? 'error' : undefined} />
@@ -138,7 +139,13 @@ export function FileUpload({ module, onBatchCreated }: Props) {
               {summary.invalidRows.slice(0, 5).map((row) => (
                 <Typography key={`${row.rowNumber}-${row.reason}`} variant="body2" color="error.main">
                   Row {row.rowNumber}
-                  {row.customerId ? ` · ${row.customerId}` : ''}: {row.reason}
+                  {row.customerId ? (
+                    <>
+                      {' · '}
+                      <CopyableText value={row.customerId} />
+                    </>
+                  ) : null}
+                  : {row.reason}
                 </Typography>
               ))}
               {summary.invalidRows.length > 5 && (

@@ -18,6 +18,7 @@ import {
   Typography,
 } from '@mui/material';
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import FileDownloadOutlinedIcon from '@mui/icons-material/FileDownloadOutlined';
 import { AgGridReact } from 'ag-grid-react';
 import type { ColDef, ICellRendererParams } from 'ag-grid-community';
 import {
@@ -35,13 +36,26 @@ import {
   apiMessage,
   completionPercent,
   formatCount,
+  failedDownloadName,
   formatDuration,
   formatIst,
   isBatchLive,
   SOCKET_FALLBACK_MS,
 } from '../lib/batch';
 import { useSocketStatus } from '../realtime/batchSocket';
+import { CopyableText } from './CopyableText';
 import { StatusChip } from './StatusChip';
+
+function responseField(raw: unknown, key: 'invoiceId' | 'orderId'): string {
+  if (typeof raw !== 'string' || !raw) return '';
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const value = parsed[key];
+    return typeof value === 'string' ? value : '';
+  } catch {
+    return '';
+  }
+}
 
 interface Props {
   batchId: string;
@@ -59,6 +73,7 @@ export function BatchDetails({ batchId, moduleKey }: Props) {
   const [notice, setNotice] = useState<string | null>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [downloadAnchor, setDownloadAnchor] = useState<HTMLElement | null>(null);
+  const [downloading, setDownloading] = useState(false);
 
   useEffect(() => {
     setTab(0);
@@ -149,17 +164,35 @@ export function BatchDetails({ batchId, moduleKey }: Props) {
 
   const openDownload = async (type: 'original' | 'processed' | 'failed' | 'success') => {
     setDownloadAnchor(null);
+    setDownloading(true);
     try {
       const report = await downloadReport(batchId, type);
-      window.open(report.url, '_blank', 'noopener,noreferrer');
+      const link = document.createElement('a');
+      link.href = report.url;
+      link.download = report.filename || '';
+      link.rel = 'noopener';
+      link.target = '_blank';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
     } catch (err: unknown) {
       setError(apiMessage(err, 'That file is not available yet.'));
+    } finally {
+      setDownloading(false);
     }
   };
 
   const itemCols = useMemo<ColDef<BatchItem>[]>(
     () => [
-      { field: 'customerId', headerName: 'Customer', flex: 1, minWidth: 140 },
+      {
+        field: 'customerId',
+        headerName: 'Customer',
+        flex: 1,
+        minWidth: 150,
+        cellRenderer: (params: ICellRendererParams<BatchItem, string>) => (
+          <CopyableText value={params.value} />
+        ),
+      },
       { field: 'amount', headerName: 'Amount', width: 130 },
       {
         field: 'status',
@@ -169,7 +202,25 @@ export function BatchDetails({ batchId, moduleKey }: Props) {
           params.value ? <StatusChip status={params.value} /> : null,
       },
       { field: 'retryCount', headerName: 'Retries', width: 110 },
-      { field: 'responseCode', headerName: 'Code', width: 180 },
+      { field: 'responseCode', headerName: 'Code', minWidth: 280, flex: 1.2 },
+      {
+        headerName: 'Invoice',
+        minWidth: 180,
+        flex: 1,
+        valueGetter: (params) => responseField(params.data?.responseBody, 'invoiceId'),
+        cellRenderer: (params: ICellRendererParams<BatchItem, string>) => (
+          <CopyableText value={params.value} />
+        ),
+      },
+      {
+        headerName: 'Order',
+        minWidth: 180,
+        flex: 1,
+        valueGetter: (params) => responseField(params.data?.responseBody, 'orderId'),
+        cellRenderer: (params: ICellRendererParams<BatchItem, string>) => (
+          <CopyableText value={params.value} />
+        ),
+      },
       { field: 'failureReason', headerName: 'Reason', flex: 1.4, minWidth: 180 },
     ],
     [],
@@ -197,7 +248,9 @@ export function BatchDetails({ batchId, moduleKey }: Props) {
       <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ md: 'flex-start' }} spacing={2}>
         <Box>
           <Stack direction="row" spacing={1} alignItems="center">
-            <Typography variant="h6">Batch #{batch.id}</Typography>
+            <Typography variant="h6" component="div">
+              Batch <CopyableText value={batch.id} />
+            </Typography>
             <Box className={live ? 'live-dot' : 'idle-dot'} />
             <Typography variant="caption" color="text.secondary">
               {connected ? (live ? 'Live' : 'Finished') : 'Reconnecting'}
@@ -265,7 +318,10 @@ export function BatchDetails({ batchId, moduleKey }: Props) {
           <Metric label={live ? 'Running' : 'Elapsed'} value={formatDuration(batch.durationMs)} />
           <Metric label="Accepted" value={formatCount(batch.successCount)} tone="success" />
           <Metric label="Failed" value={formatCount(batch.failedCount)} tone={batch.failedCount ? 'error' : undefined} />
+          <Metric label="Total" value={formatCount(batch.totalRecords)} />
+          <Metric label="File rows" value={formatCount(batch.fileRecords ?? batch.totalRecords)} />
           <Metric label="Duplicates" value={formatCount(batch.duplicateCount)} />
+          <Metric label="Invalid" value={formatCount(batch.invalidCount ?? 0)} />
         </Box>
       </Box>
 
@@ -275,6 +331,33 @@ export function BatchDetails({ batchId, moduleKey }: Props) {
         <Tab label="Call log" />
       </Tabs>
 
+      {tab === 1 && (
+        <Stack
+          direction={{ xs: 'column', sm: 'row' }}
+          spacing={1.5}
+          justifyContent="space-between"
+          alignItems={{ sm: 'center' }}
+        >
+          <Box sx={{ minWidth: 0 }}>
+            <Typography variant="subtitle2">Failed customers</Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', wordBreak: 'break-all' }}>
+              {batch.failedCount
+                ? `Saves as ${failedDownloadName(batch)}`
+                : 'No failed customers in this batch yet.'}
+            </Typography>
+          </Box>
+          <Button
+            variant="contained"
+            size="small"
+            startIcon={<FileDownloadOutlinedIcon />}
+            disabled={!batch.failedCount || downloading}
+            onClick={() => void openDownload('failed')}
+          >
+            {downloading ? 'Preparing…' : `Download ${formatCount(batch.failedCount)} failed`}
+          </Button>
+        </Stack>
+      )}
+
       {(tab === 0 || tab === 1) && (
         <Stack spacing={1}>
           <Box className="ag-theme-quartz grid-frame" sx={{ height: 440, width: '100%' }}>
@@ -283,6 +366,8 @@ export function BatchDetails({ batchId, moduleKey }: Props) {
               rowData={itemsQuery.data?.items || []}
               columnDefs={itemCols}
               getRowId={(params) => params.data.id}
+              enableCellTextSelection
+              ensureDomOrder
               defaultColDef={{ sortable: true, filter: true, resizable: true }}
               overlayNoRowsTemplate={itemsQuery.isLoading ? 'Loading customers…' : 'No customers in this view.'}
             />
@@ -317,7 +402,33 @@ export function BatchDetails({ batchId, moduleKey }: Props) {
               { field: 'statusCode', headerName: 'HTTP', width: 110 },
               { field: 'latency', headerName: 'Latency', width: 120 },
               { field: 'retryNo', headerName: 'Retry', width: 100 },
-              { field: 'traceId', headerName: 'Trace', flex: 1, minWidth: 160 },
+              {
+                field: 'traceId',
+                headerName: 'Trace',
+                flex: 1,
+                minWidth: 160,
+                cellRenderer: (params: ICellRendererParams<Record<string, unknown>, string>) => (
+                  <CopyableText value={params.value} />
+                ),
+              },
+              {
+                headerName: 'Invoice',
+                minWidth: 180,
+                flex: 1,
+                valueGetter: (params) => responseField(params.data?.response, 'invoiceId'),
+                cellRenderer: (params: ICellRendererParams<Record<string, unknown>, string>) => (
+                  <CopyableText value={params.value} />
+                ),
+              },
+              {
+                headerName: 'Order',
+                minWidth: 180,
+                flex: 1,
+                valueGetter: (params) => responseField(params.data?.response, 'orderId'),
+                cellRenderer: (params: ICellRendererParams<Record<string, unknown>, string>) => (
+                  <CopyableText value={params.value} />
+                ),
+              },
               {
                 field: 'createdAt',
                 headerName: 'Time',
@@ -326,6 +437,8 @@ export function BatchDetails({ batchId, moduleKey }: Props) {
                 valueFormatter: (params) => formatIst(typeof params.value === 'string' ? params.value : null),
               },
             ]}
+            enableCellTextSelection
+            ensureDomOrder
             defaultColDef={{ sortable: true, resizable: true }}
             overlayNoRowsTemplate={logsQuery.isLoading ? 'Loading calls…' : 'No calls recorded yet.'}
           />

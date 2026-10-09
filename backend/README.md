@@ -87,7 +87,7 @@ Details and how to go faster or slower: [docs/payment-integration.md](docs/payme
 
 ## Email (batch completion)
 
-When a batch finishes, nodemailer sends one report (and `failed.csv` when there are failures) to the uploader and `BATCH_REPORT_EMAIL` (default `akshay.kanherkar@getzype.com`).
+When a batch finishes, nodemailer sends one report to the uploader and `BATCH_REPORT_EMAIL` (default `akshay.kanherkar@getzype.com`). The HTML shows up to 5 sample failures. The attached `failed.csv` lists every failed customer.
 
 Transport order:
 

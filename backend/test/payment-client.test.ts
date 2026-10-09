@@ -9,10 +9,13 @@ import {
   HEALTH_PATH,
   UPI_PATHS,
   interpretPaymentHttpResponse,
+  paymentResultRecord,
   rateLimitDelayMs,
   PAYMENT_RATE_WINDOW_MS,
+  API_KEY_DEFER_MS,
   interpretTransportError,
   invoiceNotReadyDelayMs,
+  invoiceNotDueDelayMs,
   isHealthUp,
   needsHealthProbe,
 } from '../src/infrastructure/payment/retry-policy.js';
@@ -121,6 +124,42 @@ test('the payment-service retryable flag decides 400s, and a bare 5xx is still r
   assert.equal(gateway.retryable, true);
   assert.equal(gateway.responseCode, 'CANNOT_CREATE_AUTOPAY_INVOICE');
 
+  const created = interpretPaymentHttpResponse(
+    200,
+    {
+      status: 'success',
+      message: 'AUTOPAY_INVOICE_CREATED_SUCCESSFULLY',
+      retryable: false,
+      data: {
+        customerId: '8840034',
+        paymentGatewayProvider: 'BILLDESK',
+        invoiceOrder: {
+          created_date: { fn: 'now', args: [] },
+          updated_date: { fn: 'now', args: [] },
+          amount: null,
+          status: 'INITIALIZED',
+          invoiceId: 'IN0DB5225307036',
+          orderId: 'ORDERID07d40b57-49fb-4142-8690-c1fa8186d63f',
+          subscriptionRefId: 'SUBREFID0930d15f-0bf1-4bd7-9e99-034f85625942',
+          invoiceAmount: 7312,
+          invoiceStatus: 'UNPAID',
+          scheduledOn: '2026-10-11T00:00:00.000Z',
+          paymentGatewayProvider: 'BILLDESK',
+        },
+      },
+    },
+    'generate',
+  );
+  assert.equal(created.success, true);
+  assert.equal(created.retryable, false);
+  assert.equal(created.responseCode, 'AUTOPAY_INVOICE_CREATED_SUCCESSFULLY');
+  const kept = paymentResultRecord(created.body);
+  assert.equal(kept.invoiceId, 'IN0DB5225307036');
+  assert.equal(kept.invoiceAmount, 7312);
+  assert.equal(kept.invoiceStatus, 'UNPAID');
+  assert.equal(kept.orderStatus, 'INITIALIZED');
+  assert.equal(kept.created_date, undefined);
+
   const proxy = interpretPaymentHttpResponse(502, 'upstream', 'charge');
   assert.equal(proxy.success, false);
   assert.equal(proxy.retryable, true);
@@ -151,6 +190,53 @@ test('an invoice that is too young is deferred for the remaining minimum age', (
   assert.equal(waiting.deferred, true);
   assert.equal(waiting.deferDelayMs, 26 * 3_600_000 + 5 * 60_000);
   assert.equal(waiting.responseCode, 'INVOICE_NOT_READY_FOR_CHARGE');
+});
+
+test('a charge before the scheduled day waits until that IST midnight', () => {
+  const now = new Date('2026-10-09T06:03:00.000Z'); // 11:33 IST on 9 Oct
+  const delay = invoiceNotDueDelayMs(
+    {
+      data: { customerId: '8840034', scheduledOn: '2026-10-11 00:00:00' },
+    },
+    now,
+  );
+  const due = new Date('2026-10-10T18:30:00.000Z').getTime() + 60_000;
+  assert.equal(delay, Math.ceil((due - now.getTime()) / 60_000) * 60_000);
+
+  const notDue = interpretPaymentHttpResponse(
+    400,
+    {
+      status: 'failed',
+      message: 'INVOICE_NOT_DUE_FOR_CHARGE',
+      retryable: true,
+      data: { customerId: '8840034', scheduledOn: '2026-10-11 00:00:00' },
+    },
+    'charge',
+  );
+  assert.equal(notDue.success, false);
+  assert.equal(notDue.retryable, false);
+  assert.equal(notDue.deferred, true);
+  assert.equal(notDue.responseCode, 'INVOICE_NOT_DUE_FOR_CHARGE');
+  assert.equal(paymentResultRecord(notDue.body).scheduledOn, '2026-10-11 00:00:00');
+
+  const chargeFail = paymentResultRecord({
+    status: 'failed',
+    message: 'CANNOT_CHARGE_SUBSCRIPTION_PLAN',
+    retryable: true,
+    data: {
+      customerId: '8840034',
+      autopayOrder: {
+        invoiceId: 'INV-CHARGE',
+        orderId: 'ORD-CHARGE',
+        invoiceStatus: 'UNPAID',
+        subscriptionRefId: 'SUB-1',
+      },
+    },
+  });
+  assert.equal(chargeFail.invoiceId, 'INV-CHARGE');
+  assert.equal(chargeFail.orderId, 'ORD-CHARGE');
+  assert.equal(chargeFail.invoiceStatus, 'UNPAID');
+  assert.equal(chargeFail.subscriptionRefId, 'SUB-1');
 });
 
 test('thrown transport errors and timeouts are retryable', () => {
@@ -436,4 +522,61 @@ test('a burst of failures shares one healthCheck', async () => {
   await client.execute({ ...request, batchItemId: '8', traceId: 'trace-8' });
 
   assert.equal(calls.filter((url) => url.endsWith(HEALTH_PATH)).length, 1);
+});
+
+test('invoice and charge send x-api-key, and a rejected key does not use a retry', async () => {
+  const missing = interpretPaymentHttpResponse(
+    400,
+    { status: 'FAILED', message: 'API_KEY_NOT_PROVIDED_IN_HEADERS' },
+    'generate',
+  );
+  assert.equal(missing.deferred, true);
+  assert.equal(missing.retryable, false);
+  assert.equal(missing.responseCode, 'PAYMENT_API_KEY_REJECTED');
+  assert.equal(missing.deferDelayMs, API_KEY_DEFER_MS);
+
+  const rejected = interpretPaymentHttpResponse(
+    401,
+    { status: 'FAILED', message: 'UNAUTHORIZED' },
+    'charge',
+  );
+  assert.equal(rejected.deferred, true);
+  assert.equal(rejected.responseCode, 'PAYMENT_API_KEY_REJECTED');
+
+  const seen: Array<{ url: string; apiKey: string | null }> = [];
+  const client = new HttpPaymentClient({
+    baseUrl: 'http://payment.test',
+    timeoutMs: 1000,
+    apiKey: 'test-key',
+    pace: async (work) => work(),
+    fetchFn: async (url, init) => {
+      const headers = new Headers(init?.headers);
+      seen.push({ url: String(url), apiKey: headers.get('x-api-key') });
+      return new Response(
+        JSON.stringify({
+          status: 'success',
+          message: 'AUTOPAY_CHARGE_CREATED_SUCCESSFULLY',
+          retryable: false,
+        }),
+        { status: 200 },
+      );
+    },
+  });
+
+  await client.execute({
+    customerId: '10188951',
+    amount: 100,
+    operation: 'charge',
+    idempotencyKey: '9_10188951',
+    batchId: '9',
+    batchItemId: '9',
+    traceId: 'trace-9',
+  });
+
+  assert.deepEqual(seen, [
+    {
+      url: 'http://payment.test/payment-service/api/v2/upi/autopay/charge',
+      apiKey: 'test-key',
+    },
+  ]);
 });

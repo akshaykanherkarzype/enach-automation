@@ -3,6 +3,7 @@ import {
   peakDeferDelayMs,
   type PeakWindow,
 } from '../../../common/time/processing-window.js';
+import { terminalFailureReason } from '../../../infrastructure/payment/retry-policy.js';
 import type { PaymentResponse } from '../../../infrastructure/payment/types.js';
 
 export type BatchModuleName = 'INVOICE_GENERATION' | 'INVOICE_CHARGE';
@@ -84,14 +85,18 @@ export function planAfterResponse(input: AfterResponseInput): AfterResponsePlan 
   const bodyMessage =
     typeof input.response.body.message === 'string' ? input.response.body.message : '';
   const reason = bodyMessage || input.response.responseCode || 'PAYMENT_FAILED';
+  const fail = (text: string): AfterResponsePlan => ({
+    action: 'fail',
+    reason: terminalFailureReason(input.response.body, text),
+  });
 
   if (!input.response.retryable) {
-    return { action: 'fail', reason };
+    return fail(reason);
   }
 
   const nextRetry = input.retryCount + 1;
   if (nextRetry > input.maxRetry) {
-    return { action: 'fail', reason };
+    return fail(reason);
   }
 
   const delays = input.retryDelaysMs.length ? input.retryDelaysMs : [5_000, 30_000, 120_000];
@@ -101,7 +106,7 @@ export function planAfterResponse(input: AfterResponseInput): AfterResponsePlan 
     const fireAt = new Date(input.now.getTime() + delayMs);
     const gate = invoiceCallGate(fireAt, input.anchorDay, input.dayEndBufferMs);
     if (!gate.ok) {
-      return { action: 'fail', reason: `${reason}; ${gate.reason}` };
+      return fail(`${reason}; ${gate.reason}`);
     }
   }
 

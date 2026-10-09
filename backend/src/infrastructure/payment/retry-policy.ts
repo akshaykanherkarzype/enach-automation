@@ -1,4 +1,5 @@
 import type { PaymentOperation, PaymentResponse } from './types.js';
+import { istDateString, istWallClockToUtc } from '../../common/time/ist.js';
 
 /** payment-service `responseStatuses.SUCCESS`. */
 export const SUCCESS_STATUS = 'success';
@@ -17,6 +18,12 @@ export const CHARGE_SUCCESS_MESSAGE = 'AUTOPAY_CHARGE_CREATED_SUCCESSFULLY';
  */
 export const INVOICE_NOT_READY_MESSAGE = 'INVOICE_NOT_READY_FOR_CHARGE';
 
+/**
+ * Charge is refused while the invoice's scheduled day is still in the future (IST).
+ * payment-service marks this retryable. The short retry schedule cannot wait until that day.
+ */
+export const INVOICE_NOT_DUE_MESSAGE = 'INVOICE_NOT_DUE_FOR_CHARGE';
+
 export const UPI_PATHS: Record<PaymentOperation, string> = {
   generate: '/payment-service/api/v2/upi/autopay/invoice',
   charge: '/payment-service/api/v2/upi/autopay/charge',
@@ -28,8 +35,11 @@ export const HEALTH_UP_STATUS = 'UP';
 export const HEALTH_PROBE_TIMEOUT_MS = 5_000;
 /** Wait before trying the customer again while payment-service is down. Does not use MAX_RETRY. */
 export const HEALTH_DEFER_MS = 30_000;
-/** Reuse one health result across the in-flight calls of a 50k–1 lakh batch. */
+/** Reuse one health result across the in-flight calls of a large batch. */
 export const HEALTH_CACHE_MS = 5_000;
+/** Missing or rejected x-api-key. Requeue without counting this against MAX_RETRY. */
+export const API_KEY_DEFER_MS = 60_000;
+const API_KEY_MESSAGES = new Set(['API_KEY_NOT_PROVIDED_IN_HEADERS', 'UNAUTHORIZED']);
 
 /**
  * payment-service `express-rate-limit`: 25,000 requests per IP per 60 seconds
@@ -45,6 +55,69 @@ const NOT_READY_PROBE_MS = 15 * 60 * 1000;
 const NOT_READY_CAP_MS = 48 * 60 * 60 * 1000;
 
 type Interpreted = Omit<PaymentResponse, 'latencyMs'>;
+
+function nestedRecord(value: unknown): Record<string, unknown> {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;
+  return {};
+}
+
+/**
+ * The fields worth keeping from a UPI response. Invoice success still has
+ * invoiceStatus UNPAID and order status INITIALIZED. The amount is invoiceAmount.
+ * created_date / updated_date arrive as database literals and are left out.
+ */
+export function paymentResultRecord(body: Record<string, unknown>): Record<string, unknown> {
+  const data = nestedRecord(body.data);
+  const record: Record<string, unknown> = {};
+  if (body.status !== undefined) record.status = body.status;
+  if (body.message !== undefined) record.message = body.message;
+  if (body.retryable !== undefined) record.retryable = body.retryable;
+
+  const invoiceOrder = nestedRecord(data.invoiceOrder);
+  const autopayOrder = nestedRecord(data.autopayOrder);
+  const order = { ...autopayOrder, ...invoiceOrder };
+  const gateway = data.paymentGatewayProvider ?? order.paymentGatewayProvider;
+  const customerId = data.customerId ?? order.customerId;
+  if (customerId !== undefined) record.customerId = customerId;
+  if (typeof gateway === 'string') record.paymentGatewayProvider = gateway;
+  if (typeof order.status === 'string') record.orderStatus = order.status;
+
+  for (const key of [
+    'invoiceId',
+    'orderId',
+    'subscriptionRefId',
+    'invoiceStatus',
+    'invoiceAmount',
+    'currency',
+    'scheduledOn',
+    'pgScheduledOn',
+    'cycle',
+    'initiatedOn',
+  ] as const) {
+    const value = order[key] ?? (key === 'scheduledOn' ? data.scheduledOn : undefined);
+    if (value !== undefined && value !== null && typeof value !== 'object') record[key] = value;
+  }
+  return record;
+}
+
+export const INVOICE_REJECTED_REASON = 'INVOICE REJECTED';
+
+/**
+ * A rejected invoice is retryable at the gateway. Once those retries are used,
+ * the stored reason should say the invoice was rejected.
+ */
+export function terminalFailureReason(body: Record<string, unknown>, fallback: string): string {
+  const message = typeof body.message === 'string' ? body.message : '';
+  const invoiceStatus = paymentResultRecord(body).invoiceStatus;
+  if (
+    message === 'CANNOT_CREATE_AUTOPAY_INVOICE' &&
+    typeof invoiceStatus === 'string' &&
+    invoiceStatus.toUpperCase() === 'REJECTED'
+  ) {
+    return INVOICE_REJECTED_REASON;
+  }
+  return fallback;
+}
 
 function asRecord(body: unknown): Record<string, unknown> {
   if (body && typeof body === 'object' && !Array.isArray(body)) {
@@ -80,6 +153,35 @@ export function invoiceNotReadyDelayMs(body: Record<string, unknown>): number {
   const delay = remainingHours * 3_600_000 + NOT_READY_BUFFER_MS;
   const capped = Math.min(NOT_READY_CAP_MS, Math.max(60_000, delay));
   return Math.ceil(capped / 60_000) * 60_000;
+}
+
+/**
+ * Wait until 00:00 IST on the scheduled day, then try the charge.
+ * A date with no timezone is that IST day. An instant with a timezone uses its IST date.
+ */
+export function invoiceNotDueDelayMs(body: Record<string, unknown>, now = new Date()): number {
+  const raw = nestedRecord(body.data).scheduledOn;
+  if (typeof raw !== 'string' || !raw.trim()) return NOT_READY_FALLBACK_MS;
+
+  const dueAt = scheduledDayStart(raw.trim());
+  if (!dueAt) return NOT_READY_FALLBACK_MS;
+
+  const wait = dueAt.getTime() - now.getTime() + 60_000;
+  if (wait <= 60_000) return NOT_READY_PROBE_MS;
+  const capped = Math.min(NOT_READY_CAP_MS, Math.max(60_000, wait));
+  return Math.ceil(capped / 60_000) * 60_000;
+}
+
+function scheduledDayStart(raw: string): Date | null {
+  const zoned = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(raw);
+  if (zoned) {
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return istWallClockToUtc(istDateString(parsed), 0, 0);
+  }
+  const match = /^(\d{4}-\d{2}-\d{2})/.exec(raw);
+  if (!match) return null;
+  return istWallClockToUtc(match[1], 0, 0);
 }
 
 /**
@@ -162,6 +264,18 @@ export function interpretPaymentHttpResponse(
   const message = typeof record.message === 'string' ? record.message : '';
   const flagged = typeof record.retryable === 'boolean' ? record.retryable : undefined;
 
+  if (statusCode === 401 || API_KEY_MESSAGES.has(message)) {
+    return {
+      success: false,
+      retryable: false,
+      deferred: true,
+      deferDelayMs: API_KEY_DEFER_MS,
+      statusCode,
+      responseCode: 'PAYMENT_API_KEY_REJECTED',
+      body: record,
+    };
+  }
+
   if (statusCode === 429) {
     return {
       success: false,
@@ -204,6 +318,18 @@ export function interpretPaymentHttpResponse(
       deferDelayMs: invoiceNotReadyDelayMs(record),
       statusCode,
       responseCode: INVOICE_NOT_READY_MESSAGE,
+      body: record,
+    };
+  }
+
+  if (message === INVOICE_NOT_DUE_MESSAGE && flagged !== false) {
+    return {
+      success: false,
+      retryable: false,
+      deferred: true,
+      deferDelayMs: invoiceNotDueDelayMs(record),
+      statusCode,
+      responseCode: INVOICE_NOT_DUE_MESSAGE,
       body: record,
     };
   }

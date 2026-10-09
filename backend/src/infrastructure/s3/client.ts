@@ -61,10 +61,16 @@ export async function uploadBuffer(
   return key;
 }
 
-export async function getSignedDownloadUrl(key: string): Promise<string> {
+export function contentDisposition(filename: string): string {
+  const safe = filename.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'download.csv';
+  return `attachment; filename="${safe}"`;
+}
+
+export async function getSignedDownloadUrl(key: string, filename?: string): Promise<string> {
   const command = new GetObjectCommand({
     Bucket: env.S3_BUCKET,
     Key: key,
+    ...(filename ? { ResponseContentDisposition: contentDisposition(filename) } : {}),
   });
   return getSignedUrl(s3, command, { expiresIn: env.S3_SIGNED_URL_TTL_SECONDS });
 }

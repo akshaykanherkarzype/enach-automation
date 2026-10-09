@@ -25,6 +25,7 @@ export interface BatchExecution {
   uploadedBy: string;
   uploadedAt: string;
   startedAt?: string | null;
+  processingDay?: string | null;
   completedAt?: string | null;
   totalRecords: number;
   successCount: number;
@@ -37,6 +38,8 @@ export interface BatchExecution {
   etaMs?: number | null;
   durationMs?: number;
   workersRunning?: number;
+  invalidCount?: number;
+  fileRecords?: number;
   originalFile?: string | null;
   processedFile?: string | null;
   failureReport?: string | null;
@@ -52,6 +55,7 @@ export interface BatchItem {
   retryCount: number;
   failureReason?: string | null;
   responseCode?: string | null;
+  responseBody?: string | null;
   startedAt?: string | null;
   completedAt?: string | null;
 }
@@ -78,9 +82,11 @@ export async function confirmUpload(module: BatchModuleSlug, uploadToken: string
   return data as BatchExecution;
 }
 
+export const RECENT_BATCH_LIMIT = 5;
+
 export async function listBatches(module: BatchModuleSlug, page = 1) {
   const { data } = await api.get('/batches', {
-    params: { module, page, pageSize: 20 },
+    params: { module, page, pageSize: RECENT_BATCH_LIMIT },
   });
   return data as {
     items: BatchExecution[];
@@ -126,5 +132,5 @@ export async function cancelBatch(id: string) {
 
 export async function downloadReport(id: string, type: 'original' | 'processed' | 'failed' | 'success') {
   const { data } = await api.get(`/batches/${id}/download/${type}`);
-  return data as { url: string; key: string };
+  return data as { url: string; key: string; filename?: string };
 }

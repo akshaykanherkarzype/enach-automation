@@ -70,6 +70,7 @@ const envSchema = z.object({
 
   PAYMENT_CLIENT: z.enum(['mock', 'http']).default('mock'),
   PAYMENT_SERVICE_BASE_URL: z.string().default(''),
+  X_API_KEY: z.string().optional().default(''),
   PAYMENT_REQUEST_GAP_MS: z.coerce.number().min(0).default(125),
   PAYMENT_MAX_IN_FLIGHT: z.coerce.number().int().min(1).default(8),
   PAYMENT_ADAPTIVE: z
@@ -119,6 +120,13 @@ const envSchema = z.object({
       code: z.ZodIssueCode.custom,
       message: 'PAYMENT_SERVICE_BASE_URL is required when PAYMENT_CLIENT=http',
       path: ['PAYMENT_SERVICE_BASE_URL'],
+    });
+  }
+  if (data.PAYMENT_CLIENT === 'http' && !data.X_API_KEY.trim()) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'X_API_KEY is required when PAYMENT_CLIENT=http',
+      path: ['X_API_KEY'],
     });
   }
 });

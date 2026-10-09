@@ -23,6 +23,7 @@ export function createPaymentClient(): PaymentClient {
     return new HttpPaymentClient({
       baseUrl: env.PAYMENT_SERVICE_BASE_URL,
       timeoutMs: env.API_TIMEOUT,
+      apiKey: env.X_API_KEY,
       slotRetryDelayMs: 5_000,
       pace: pacePaymentCall,
       onLatency: (latencyMs) => {

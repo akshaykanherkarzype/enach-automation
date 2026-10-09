@@ -134,6 +134,71 @@ test('invoice retries that would land on the next IST day are failed instead', (
   if (plan.action === 'fail') assert.match(plan.reason, /INVOICE_DAY_END_BUFFER|INVOICE_DAY_CHANGED/);
 });
 
+test('a rejected invoice is named INVOICE REJECTED only after the retries are used', () => {
+  const body = {
+    status: 'failed',
+    message: 'CANNOT_CREATE_AUTOPAY_INVOICE',
+    retryable: true,
+    data: {
+      invoiceOrder: { invoiceStatus: 'REJECTED', invoiceId: 'INV-REJECTED', orderId: 'ORD-1' },
+    },
+  };
+  const again = planAfterResponse({
+    now: new Date('2026-09-30T08:00:00.000Z'),
+    module: 'INVOICE_GENERATION',
+    anchorDay: '2026-09-30',
+    enforceSameDay: true,
+    dayEndBufferMs: 300_000,
+    response: {
+      success: false,
+      retryable: true,
+      responseCode: 'CANNOT_CREATE_AUTOPAY_INVOICE',
+      body,
+    },
+    retryCount: 0,
+    maxRetry: 3,
+    retryDelaysMs: delays,
+  });
+  assert.equal(again.action, 'retry');
+  if (again.action === 'retry') assert.equal(again.reason, 'CANNOT_CREATE_AUTOPAY_INVOICE');
+
+  const exhausted = planAfterResponse({
+    now: new Date('2026-09-30T08:00:00.000Z'),
+    module: 'INVOICE_GENERATION',
+    anchorDay: '2026-09-30',
+    enforceSameDay: true,
+    dayEndBufferMs: 300_000,
+    response: {
+      success: false,
+      retryable: true,
+      responseCode: 'CANNOT_CREATE_AUTOPAY_INVOICE',
+      body,
+    },
+    retryCount: 3,
+    maxRetry: 3,
+    retryDelaysMs: delays,
+  });
+  assert.deepEqual(exhausted, { action: 'fail', reason: 'INVOICE REJECTED' });
+
+  const other = planAfterResponse({
+    now: new Date('2026-09-30T08:00:00.000Z'),
+    module: 'INVOICE_GENERATION',
+    anchorDay: '2026-09-30',
+    enforceSameDay: true,
+    dayEndBufferMs: 300_000,
+    response: {
+      success: false,
+      retryable: true,
+      responseCode: 'CANNOT_CREATE_AUTOPAY_INVOICE',
+      body: { message: 'CANNOT_CREATE_AUTOPAY_INVOICE', retryable: true },
+    },
+    retryCount: 3,
+    maxRetry: 3,
+    retryDelaysMs: delays,
+  });
+  assert.deepEqual(other, { action: 'fail', reason: 'CANNOT_CREATE_AUTOPAY_INVOICE' });
+});
+
 test('retries stop after the configured maximum', () => {
   const plan = planAfterResponse({
     now: new Date('2026-09-30T08:00:00.000Z'),

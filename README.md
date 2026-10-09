@@ -9,7 +9,7 @@ Two modules run independently:
 | Invoice Generation | `POST /payment-service/api/v2/upi/autopay/invoice` |
 | Invoice Charge | `POST /payment-service/api/v2/upi/autopay/charge` |
 
-Each request body is one customer: `{ "customerId": 10188945, "amount": 7068 }`.
+Each request body is one customer: `{ "customerId": 10188945, "amount": 7068 }`. Both calls send header `x-api-key`, the same value as payment-service `X_API_KEY`.
 
 ## Layout
 
@@ -160,7 +160,9 @@ Confirm publishes customer ids in pages of 1,000. MySQL inserts use `BATCH_SIZE`
 flowchart TD
   take[Take one customer from the queue] --> skip{Already SUCCESS or batch cancelled?}
   skip -->|yes| stop[Leave it]
-  skip -->|no| peak{PAYMENT_CLIENT=http and inside a peak window?}
+  skip -->|no| day{Invoice generation and the IST day has changed?}
+  day -->|yes| dayFail[Mark FAILED and do not call payment-service]
+  day -->|no| peak{PAYMENT_CLIENT=http and inside a peak window?}
   peak -->|yes| peakWait[Requeue until the window ends]
   peak -->|no| pressure{Host memory, disk, CPU, or event loop over the pause line?}
   pressure -->|yes| pressureWait[Requeue in 30 seconds]
@@ -168,7 +170,7 @@ flowchart TD
   slot --> post[POST one customer to payment-service]
   post --> answer{How did it answer?}
   answer -->|accepted| success[Mark SUCCESS]
-  answer -->|business retryable| retry[Requeue 5s, then 30s, then 2m]
+  answer -->|business retryable| retry[Wait 5s, then 30s, then 2m, and try again among the other calls]
   answer -->|permanent| fail[Mark FAILED and copy to the DLQ]
   answer -->|defer| later[Requeue without using a retry]
 ```
@@ -177,7 +179,11 @@ flowchart TD
 
 `PAYMENT_CLIENT=http` is the production path. Restart the worker after changing `.env`.
 
-A deferred customer stays `PENDING`, or `RETRYING` if it has already failed once. The message sits on a RabbitMQ delay queue and comes back when the wait ends. The worker must be running at that moment. If it is stopped, the message waits on the queue and runs when the worker returns, after a fresh check of the clock and the host.
+Invoice generation is tied to the IST day stored when the file was confirmed (`processingDay`). If that customer is still on the queue after midnight, or inside the last 5 minutes of that day, the worker marks it failed and does not call payment-service. Customers already accepted stay accepted. Invoice charge is not limited to that day. Set `INVOICE_SAME_DAY_GUARD=false` to allow a leftover invoice message the next day.
+
+A deferred customer stays `PENDING`, or `RETRYING` if it has already failed once. The message sits on a RabbitMQ delay queue and, when the wait ends, returns to `{queue}-retry`. That queue is consumed while the main file is still running, so a 5 second or 2 minute retry is not stuck behind every remaining customer. The payment in-flight cap still limits how many calls are open. The worker must be running when the wait ends. If it is stopped, the message waits on the queue and runs when the worker returns, after a fresh check of the clock and the host.
+
+`CANNOT_CREATE_AUTOPAY_INVOICE` with `invoiceStatus: REJECTED` is still retried. After the retries are used, the failure reason is `INVOICE REJECTED`. Charge failures keep the payment-service reason and also store the invoice id, order id, and related fields on `failed.csv`.
 
 ## How a payment-service answer is treated
 
@@ -185,7 +191,7 @@ A deferred customer stays `PENDING`, or `RETRYING` if it has already failed once
 flowchart TD
   resp[HTTP response] --> ok{200 and status success and a known message?}
   ok -->|yes| success[SUCCESS]
-  ok -->|no| young{INVOICE_NOT_READY_FOR_CHARGE?}
+  ok -->|no| young{Invoice not ready or not due yet?}
   young -->|yes| age[Wait until the invoice is old enough]
   young -->|no| limited{HTTP 429?}
   limited -->|yes| rate[Wait Retry-After, or 62 seconds, and slow every worker to 1 call]
@@ -228,6 +234,7 @@ Waits that do not use a retry:
 | Health check not `UP` | 30 seconds. One health result is shared for 5 seconds |
 | HTTP 429 rate limit | `Retry-After`, or 62 seconds. Payment-service allows 25,000 requests per IP per minute |
 | Invoice too young to charge | `(minimumChargeHours - invoiceAndChargeDiffHours)` hours plus 5 minutes, from the response |
+| Invoice not due yet | Until 00:00 IST on `scheduledOn`, capped at 48 hours, then checked again |
 | Call slot still busy after `PAYMENT_SLOT_WAIT_MS` | 5 seconds |
 
 A failed customer is also copied onto `invoice-generation-dlq` or `invoice-charge-dlq`. **Retry failed** and **Retry DLQ** put those customers back on the main queue. Both require the module to be idle, then take the lock again.
@@ -325,13 +332,14 @@ One mail per event, to the uploader and `BATCH_REPORT_EMAIL`. A local `admin@zyp
 
 | When | What is sent |
 | --- | --- |
-| payment-service health is not UP | Paused. Processed, accepted, failed, remaining |
+| the file is confirmed and customers are on the queue | Started, with the customer count, file, processing day, and queue |
+| payment-service health is not UP | Paused, with the customer, response code, and trace ID of the call that saw the outage |
 | the next call finds health UP again | Resumed |
 | a peak window starts holding calls | Paused until the window ends |
 | the first customer is allowed after that window | Resumed |
 | host pressure crosses a pause line | Paused, with the signal |
 | every signal is back under the slow line | Resumed |
-| the batch finishes | Final report, with `failed.csv` when any customer failed |
+| the batch finishes | Final report. The HTML shows up to 5 sample failures. `failed.csv` is attached with every failed customer |
 
 Transport, first match wins: SMTP, then SES, then a log line when `EMAIL_ENABLED` is false or neither transport is set.
 

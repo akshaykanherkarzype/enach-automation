@@ -24,6 +24,8 @@ export async function connectRabbitMq(): Promise<Channel> {
   const queues = [
     env.INVOICE_GENERATION_QUEUE,
     env.INVOICE_CHARGE_QUEUE,
+    retryQueueName(env.INVOICE_GENERATION_QUEUE),
+    retryQueueName(env.INVOICE_CHARGE_QUEUE),
     env.INVOICE_GENERATION_DLQ,
     env.INVOICE_CHARGE_DLQ,
   ];
@@ -138,6 +140,15 @@ export function queueForModule(module: 'INVOICE_GENERATION' | 'INVOICE_CHARGE'):
   return module === 'INVOICE_GENERATION'
     ? env.INVOICE_GENERATION_QUEUE
     : env.INVOICE_CHARGE_QUEUE;
+}
+
+/** Delay queues dead-letter here so a due retry is consumed beside the main file. */
+export function retryQueueName(queue: string): string {
+  return `${queue}-retry`;
+}
+
+export function retryQueueForModule(module: 'INVOICE_GENERATION' | 'INVOICE_CHARGE'): string {
+  return retryQueueName(queueForModule(module));
 }
 
 export function dlqForModule(module: 'INVOICE_GENERATION' | 'INVOICE_CHARGE'): string {

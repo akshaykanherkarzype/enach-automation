@@ -1,4 +1,3 @@
-import { useEffect, useState } from 'react';
 import {
   Alert,
   Box,
@@ -10,7 +9,6 @@ import {
   TableCell,
   TableContainer,
   TableHead,
-  TablePagination,
   TableRow,
   Tooltip,
   Typography,
@@ -18,7 +16,7 @@ import {
 import RefreshIcon from '@mui/icons-material/Refresh';
 import { keepPreviousData, useQuery, type UseQueryResult } from '@tanstack/react-query';
 import type { BatchExecution, BatchModuleSlug } from '../api/batchApi';
-import { listBatches } from '../api/batchApi';
+import { listBatches, RECENT_BATCH_LIMIT } from '../api/batchApi';
 import { completionPercent, formatCount, formatIst, isBatchLive, SOCKET_FALLBACK_MS } from '../lib/batch';
 import { useSocketStatus } from '../realtime/batchSocket';
 import { StatusChip } from './StatusChip';
@@ -43,59 +41,51 @@ export function useBatchList(module: BatchModuleSlug, page: number) {
 }
 
 export function BatchHistory({ module, selectedId, onSelect }: Props) {
-  const [page, setPage] = useState(0);
-
-  useEffect(() => {
-    setPage(0);
-  }, [module]);
-
-  const query = useBatchList(module, page + 1);
-  return (
-    <BatchHistoryView
-      query={query}
-      page={page}
-      selectedId={selectedId}
-      onSelect={onSelect}
-      onPageChange={setPage}
-    />
-  );
+  const query = useBatchList(module, 1);
+  return <BatchHistoryView query={query} selectedId={selectedId} onSelect={onSelect} />;
 }
 
 function BatchHistoryView({
   query,
-  page,
   selectedId,
   onSelect,
-  onPageChange,
 }: {
   query: UseQueryResult<{ items: BatchExecution[]; total: number; page: number; pageSize: number }>;
-  page: number;
   selectedId?: string | null;
   onSelect: (id: string) => void;
-  onPageChange: (page: number) => void;
 }) {
   const connection = useSocketStatus();
   const items = query.data?.items ?? [];
   const live = items.some((batch) => isBatchLive(batch.status));
   const showInitialLoader = query.isLoading && !query.data;
-  const accepted = items.reduce((sum, batch) => sum + batch.successCount, 0);
-  const failed = items.reduce((sum, batch) => sum + batch.failedCount, 0);
-  const customers = items.reduce((sum, batch) => sum + batch.totalRecords, 0);
+  const focus = items.find((batch) => batch.id === selectedId) ?? items[0];
+  const focusRemaining = focus
+    ? Math.max(focus.totalRecords - focus.successCount - focus.failedCount, 0)
+    : 0;
 
   return (
     <Stack spacing={2}>
-      {query.data && (
-        <Box className="kpi-grid">
-          <Kpi label="Live here" value={formatCount(items.filter((batch) => isBatchLive(batch.status)).length)} />
-          <Kpi label="Accepted" value={formatCount(accepted)} />
-          <Kpi label="Failed" value={formatCount(failed)} />
-          <Kpi label="Customers" value={formatCount(customers)} />
+      {focus && (
+        <Box>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+            {selectedId === focus.id ? `Batch #${focus.id}` : `Latest batch #${focus.id}`}
+          </Typography>
+          <Box className="kpi-grid">
+            <Kpi label="Customers" value={formatCount(focus.totalRecords)} />
+            <Kpi label="Accepted" value={formatCount(focus.successCount)} />
+            <Kpi label="Failed" value={formatCount(focus.failedCount)} />
+            <Kpi label="Remaining" value={formatCount(focusRemaining)} />
+          </Box>
         </Box>
       )}
 
       <Stack direction="row" alignItems="center" justifyContent="space-between">
         <Stack direction="row" spacing={1.25} alignItems="center">
           <Typography variant="h6">Recent batches</Typography>
+          <Typography variant="caption" color="text.secondary">
+            Latest {RECENT_BATCH_LIMIT}
+            {(query.data?.total ?? 0) > RECENT_BATCH_LIMIT ? ` of ${formatCount(query.data?.total ?? 0)}` : ''}
+          </Typography>
           <LiveMark live={live} connection={connection} hasData={Boolean(query.data)} />
         </Stack>
         <Tooltip title="Refresh now">
@@ -141,6 +131,9 @@ function BatchHistoryView({
               <TableCell width={180}>Status</TableCell>
               <TableCell width={200}>Progress</TableCell>
               <TableCell align="right" width={88}>
+                Total
+              </TableCell>
+              <TableCell align="right" width={88}>
                 Accepted
               </TableCell>
               <TableCell align="right" width={80}>
@@ -179,6 +172,9 @@ function BatchHistoryView({
                       {formatCount(done)} / {formatCount(batch.totalRecords)} · {progress}%
                     </Typography>
                   </TableCell>
+                  <TableCell align="right" sx={{ fontVariantNumeric: 'tabular-nums' }}>
+                    {formatCount(batch.totalRecords)}
+                  </TableCell>
                   <TableCell align="right" sx={{ fontVariantNumeric: 'tabular-nums', color: 'success.dark' }}>
                     {formatCount(batch.successCount)}
                   </TableCell>
@@ -199,16 +195,6 @@ function BatchHistoryView({
       </TableContainer>
       )}
 
-      {(query.data?.total ?? 0) > 0 && (
-        <TablePagination
-          component="div"
-          count={query.data?.total ?? 0}
-          page={page}
-          onPageChange={(_event, next) => onPageChange(next)}
-          rowsPerPage={query.data?.pageSize ?? 20}
-          rowsPerPageOptions={[20]}
-        />
-      )}
     </Stack>
   );
 }

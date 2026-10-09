@@ -149,6 +149,7 @@ export class BatchRepository {
     status: ItemStatus | undefined,
     afterId: bigint | null,
     take = PAGE_SCAN,
+    withResponse = false,
   ) {
     return prisma.batchExecutionItem.findMany({
       where: {
@@ -156,10 +157,37 @@ export class BatchRepository {
         ...(status ? { status } : {}),
         ...(afterId ? { id: { gt: afterId } } : {}),
       },
-      select: { id: true, customerId: true, amount: true, failureReason: true },
+      select: {
+        id: true,
+        customerId: true,
+        amount: true,
+        failureReason: true,
+        responseCode: true,
+        retryCount: true,
+        ...(withResponse ? { responseBody: true } : {}),
+      },
       orderBy: { id: 'asc' },
       take,
     });
+  }
+
+  /** Latest payment trace for each customer in the batch. */
+  async latestTraceByItem(batchId: bigint): Promise<Map<string, string>> {
+    const rows = await prisma.$queryRaw<Array<{ batchItemId: bigint; traceId: string | null }>>`
+      SELECT log_row.batchItemId AS batchItemId, log_row.traceId AS traceId
+      FROM batch_execution_logs AS log_row
+      INNER JOIN (
+        SELECT batchItemId, MAX(id) AS id
+        FROM batch_execution_logs
+        WHERE batchId = ${batchId}
+        GROUP BY batchItemId
+      ) AS latest ON latest.id = log_row.id
+    `;
+    const traces = new Map<string, string>();
+    for (const row of rows) {
+      if (row.traceId) traces.set(String(row.batchItemId), row.traceId);
+    }
+    return traces;
   }
 
   createAudit(data: Prisma.AuditLogCreateInput) {

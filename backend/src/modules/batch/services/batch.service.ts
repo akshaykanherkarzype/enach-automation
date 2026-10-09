@@ -12,13 +12,22 @@ import {
   publishBatch,
   publishToQueue,
   queueForModule,
+  retryQueueForModule,
 } from '../../../infrastructure/rabbitmq/client.js';
 import { prisma } from '../../../infrastructure/mysql/prisma.js';
 import { queuePublishCounter } from '../../../plugins/metrics.js';
 import type { ConfirmUploadInput, DownloadType, ValidationResult } from '../dto/types.js';
 import { scheduleBatchChanged } from '../../../infrastructure/realtime/batch-events.js';
 import { batchRepository } from '../repositories/batch.repository.js';
-import { fileService } from './file.service.js';
+import {
+  FAILURE_EMAIL_SAMPLE,
+  fileService,
+  isTerminalBatch,
+  renderFailedCsv,
+  reportDownloadName,
+  storedPaymentFields,
+  type FailedReportRow,
+} from './file.service.js';
 import { lockService } from './lock.service.js';
 
 // In-memory validation cache keyed by uploadToken (TTL handled lightly)
@@ -32,6 +41,11 @@ const PUBLISH_PAGE = 1_000;
 
 function moduleLabel(module: BatchModule): string {
   return module === 'INVOICE_GENERATION' ? 'Invoice generation' : 'Invoice charge';
+}
+
+export function invalidCountFromRemarks(remarks: string | null | undefined): number {
+  const match = /(?:^|;)\s*invalid=(\d+)/.exec(remarks ?? '');
+  return match ? Number(match[1]) : 0;
 }
 
 function purgeExpiredCache(): void {
@@ -135,7 +149,7 @@ export class BatchService {
 
       const queue = queueForModule(module);
       const startedAt = new Date();
-      const queued = await this.publishItems(queue, batch.id);
+      const queued = result.validRows.length;
       await batchRepository.update(batch.id, {
         status: 'QUEUED',
         startedAt,
@@ -153,12 +167,27 @@ export class BatchService {
         details: JSON.stringify({ module, total: queued, lockToken }),
       });
 
-      // Store lock token on batch remarks for release later
       await batchRepository.update(batch.id, {
         remarks: `${batch.remarks || ''};lockToken=${lockToken}`,
       });
 
       validationCache.delete(uploadToken);
+
+      // Send this before the queue publish. The worker can defer the first
+      // customer for peak hours as soon as a message is visible.
+      await this.sendStartedNotice({
+        to: uploadedBy,
+        module,
+        batchId: String(batch.id),
+        queued,
+        duplicates: result.duplicateCount,
+        invalid: result.invalidCount,
+        filename: result.originalFilename,
+        processingDay: istDateString(startedAt),
+        queue,
+      });
+
+      await this.publishItems(queue, batch.id);
 
       const fresh = await batchRepository.findById(batch.id);
       scheduleBatchChanged(batch.id, true);
@@ -205,6 +234,7 @@ export class BatchService {
     const etaMs =
       recordsPerMin > 0 ? Math.round((remaining / recordsPerMin) * 60_000) : null;
 
+    const invalidCount = invalidCountFromRemarks(batch.remarks);
     return serializeBigInt({
       ...batch,
       ...counts,
@@ -212,6 +242,8 @@ export class BatchService {
       remaining,
       recordsPerMin,
       etaMs,
+      invalidCount,
+      fileRecords: batch.totalRecords + batch.duplicateCount + invalidCount,
       durationMs: batch.completedAt && batch.startedAt
         ? batch.completedAt.getTime() - batch.startedAt.getTime()
         : elapsedMs,
@@ -367,17 +399,8 @@ export class BatchService {
         break;
       case 'failed':
         key = batch.failureReport;
-        if (!key) {
-          // Generate on the fly
-          const failed = await this.collectItems(id, 'FAILED');
-          key = await fileService.uploadFailedReport(
-            id,
-            failed.map((row) => ({
-              customerId: row.customerId,
-              amount: row.amount.toString(),
-              reason: row.failureReason || 'Unknown',
-            })),
-          );
+        if (!key || !isTerminalBatch(batch.status)) {
+          key = await fileService.uploadFailedReport(id, await this.failureRows(id));
           await batchRepository.update(id, { failureReport: key });
         }
         break;
@@ -385,11 +408,13 @@ export class BatchService {
         key = batch.successReport;
         if (!key) {
           const success = await this.collectItems(id, 'SUCCESS');
+          const traces = await batchRepository.latestTraceByItem(id);
           key = await fileService.uploadSuccessReport(
             id,
             success.map((row) => ({
               customerId: row.customerId,
               amount: row.amount.toString(),
+              traceId: traces.get(String(row.id)) ?? '',
             })),
           );
           await batchRepository.update(id, { successReport: key });
@@ -400,8 +425,15 @@ export class BatchService {
     }
 
     if (!key) throw new NotFoundError('File not available');
-    const url = await fileService.signedUrl(key);
-    return { url, key };
+    const filename = reportDownloadName({
+      module: batch.module,
+      batchId: String(id),
+      kind: type === 'success' ? 'accepted' : type === 'failed' ? 'failed' : type,
+      date: batch.processingDay || istDateString(batch.completedAt ?? batch.uploadedAt),
+      extension: type === 'original' ? key.split('.').pop() : 'csv',
+    });
+    const url = await fileService.signedUrl(key, filename);
+    return { url, key, filename };
   }
 
   async finalizeIfComplete(batchId: bigint): Promise<boolean> {
@@ -423,15 +455,8 @@ export class BatchService {
     if (counts.failedCount > 0 && counts.successCount > 0) status = 'PARTIAL_SUCCESS';
     else if (counts.failedCount > 0 && counts.successCount === 0) status = 'FAILED';
 
-    const failed = await this.collectItems(batchId, 'FAILED');
-    const failureKey = await fileService.uploadFailedReport(
-      batchId,
-      failed.map((row) => ({
-        customerId: row.customerId,
-        amount: row.amount.toString(),
-        reason: row.failureReason || 'Unknown',
-      })),
-    );
+    const failed = await this.failureRows(batchId);
+    const failureKey = await fileService.uploadFailedReport(batchId, failed);
 
     const completedAt = new Date();
     await batchRepository.update(batchId, {
@@ -447,17 +472,8 @@ export class BatchService {
 
     const executionTimeMs =
       batch.startedAt ? completedAt.getTime() - batch.startedAt.getTime() : 0;
-    const failedCsv = Buffer.from(
-      ['customer_id,final_nach_amount,failure_reason']
-        .concat(
-          failed.map(
-            (f) =>
-              `${f.customerId},${f.amount},${(f.failureReason || '').replace(/,/g, ';')}`,
-          ),
-        )
-        .join('\n'),
-      'utf8',
-    );
+    const sample = failed.slice(0, FAILURE_EMAIL_SAMPLE);
+    const failedCsv = Buffer.from(renderFailedCsv(failed), 'utf8');
 
     const emailPayload = {
       to: batch.uploadedBy,
@@ -468,8 +484,19 @@ export class BatchService {
       failed: counts.failedCount,
       duplicates: batch.duplicateCount,
       executionTimeMs,
-      failedCsv,
+      failedCsv: failed.length ? failedCsv : undefined,
       status,
+      processingDay: batch.processingDay ?? undefined,
+      requestedBy: batch.uploadedBy,
+      failures: sample.map((row) => ({
+        customerId: row.customerId,
+        responseCode: row.responseCode,
+        traceId: row.traceId,
+        reason: row.reason,
+        status: row.status,
+        invoiceId: row.invoiceId,
+        orderId: row.orderId,
+      })),
     };
 
     try {
@@ -479,6 +506,61 @@ export class BatchService {
       logger.error({ err, batchId: String(batchId) }, 'Failed to send batch email report');
     }
     return true;
+  }
+
+  private async failureRows(batchId: bigint): Promise<FailedReportRow[]> {
+    const failed = await this.collectItems(batchId, 'FAILED', true);
+    const traces = failed.length ? await batchRepository.latestTraceByItem(batchId) : new Map<string, string>();
+    return failed.map((row) => {
+      const stored = storedPaymentFields('responseBody' in row ? row.responseBody : null);
+      return {
+        customerId: row.customerId,
+        amount: row.amount.toString(),
+        status: 'FAILED',
+        responseCode: row.responseCode || '',
+        retryCount: row.retryCount,
+        traceId: traces.get(String(row.id)) ?? '',
+        reason: row.failureReason || 'Unknown',
+        invoiceId: stored.invoiceId,
+        orderId: stored.orderId,
+        invoiceStatus: stored.invoiceStatus,
+        subscriptionRefId: stored.subscriptionRefId,
+        scheduledOn: stored.scheduledOn,
+      };
+    });
+  }
+
+  private async sendStartedNotice(input: {
+    to: string;
+    module: BatchModule;
+    batchId: string;
+    queued: number;
+    duplicates: number;
+    invalid: number;
+    filename: string;
+    processingDay: string;
+    queue: string;
+  }): Promise<void> {
+    try {
+      await emailClient.sendBatchProgress({
+        to: input.to,
+        module: input.module,
+        batchId: input.batchId,
+        kind: 'started',
+        total: input.queued,
+        success: 0,
+        failed: 0,
+        remaining: input.queued,
+        duplicates: input.duplicates,
+        invalid: input.invalid,
+        filename: input.filename,
+        processingDay: input.processingDay,
+        queue: input.queue,
+        requestedBy: input.to,
+      });
+    } catch (err) {
+      logger.error({ err, batchId: input.batchId }, 'Failed to send batch start email');
+    }
   }
 
   private async publishItems(queue: string, batchId: bigint): Promise<number> {
@@ -496,11 +578,11 @@ export class BatchService {
     return count;
   }
 
-  private async collectItems(batchId: bigint, status: ItemStatus) {
+  private async collectItems(batchId: bigint, status: ItemStatus, withResponse = false) {
     const rows: Awaited<ReturnType<typeof batchRepository.scanItemIds>> = [];
     let afterId: bigint | null = null;
     for (;;) {
-      const page = await batchRepository.scanItemIds(batchId, status, afterId, PUBLISH_PAGE);
+      const page = await batchRepository.scanItemIds(batchId, status, afterId, PUBLISH_PAGE, withResponse);
       if (!page.length) break;
       rows.push(...page);
       afterId = page[page.length - 1].id;
@@ -524,7 +606,7 @@ export class BatchService {
   }
 
   async requeueItem(itemId: bigint, delayMs: number, module: BatchModule) {
-    const queue = queueForModule(module);
+    const queue = retryQueueForModule(module);
     await publishToQueue(queue, { batchItemId: String(itemId) }, delayMs);
     queuePublishCounter.inc({ queue }, 1);
   }

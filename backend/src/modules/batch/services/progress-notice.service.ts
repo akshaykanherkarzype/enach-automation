@@ -68,6 +68,9 @@ export async function notifyBatchEpisode(input: {
   next: NoticeState;
   cause?: string;
   resumesAt?: Date;
+  customerId?: string;
+  responseCode?: string;
+  traceId?: string;
 }): Promise<void> {
   const key = noticeKey(input.batchId, input.episode);
   let claim: { claimed: boolean; previous: string };
@@ -106,6 +109,9 @@ export async function notifyBatchEpisode(input: {
       remaining,
       cause: input.cause,
       resumesAt: input.resumesAt ? formatIstTimestamp(input.resumesAt) : undefined,
+      customerId: input.customerId,
+      responseCode: input.responseCode,
+      traceId: input.traceId,
     });
   } catch (err) {
     logger.error(

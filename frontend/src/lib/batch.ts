@@ -51,6 +51,34 @@ export function formatCount(value?: number | null): string {
   return new Intl.NumberFormat('en-IN').format(value ?? 0);
 }
 
+/** Saved name: module, batch id, failed, and the batch's IST day. */
+export function failedDownloadName(batch: {
+  id: string;
+  module: string;
+  processingDay?: string | null;
+  completedAt?: string | null;
+  uploadedAt?: string | null;
+}): string {
+  const moduleSlug = batch.module === 'INVOICE_CHARGE' ? 'invoice-charge' : 'invoice-generation';
+  const fromClock = istDay(batch.completedAt || batch.uploadedAt || '');
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(batch.processingDay ?? '')
+    ? batch.processingDay
+    : fromClock || 'undated';
+  return `${moduleSlug}_batch-${batch.id}_failed_${day}.csv`;
+}
+
+function istDay(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
+  return parts;
+}
+
 /** Stays below 100 until every customer is accepted or failed. */
 export function completionPercent(done: number, total: number): number {
   if (!total || total < 0) return 0;

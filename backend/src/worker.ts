@@ -6,6 +6,7 @@ import {
   connectRabbitMq,
   consumeQueue,
   disconnectRabbitMq,
+  retryQueueName,
 } from './infrastructure/rabbitmq/client.js';
 import { connectRedis, disconnectRedis } from './infrastructure/redis/client.js';
 import { processBatchItem } from './modules/batch/workers/item.worker.js';
@@ -20,6 +21,10 @@ async function startConsumers(): Promise<void> {
   const queues = [
     { name: env.INVOICE_GENERATION_QUEUE, consumers: env.QUEUE_CONSUMERS },
     { name: env.INVOICE_CHARGE_QUEUE, consumers: env.QUEUE_CONSUMERS },
+    // One listener is enough: prefetch already covers the payment in-flight cap.
+    // A due retry is taken from here while the main queue is still draining.
+    { name: retryQueueName(env.INVOICE_GENERATION_QUEUE), consumers: 1 },
+    { name: retryQueueName(env.INVOICE_CHARGE_QUEUE), consumers: 1 },
   ];
 
   for (const q of queues) {

@@ -28,6 +28,8 @@ export interface HttpPaymentClientOptions {
   onLatency?: (latencyMs: number) => void;
   /** Called when payment-service returns 429, so every worker slows together. */
   onRateLimit?: (delayMs: number) => void;
+  /** Sent as x-api-key on the invoice and charge calls. Health check does not use it. */
+  apiKey?: string;
 }
 
 /**
@@ -71,11 +73,7 @@ export class HttpPaymentClient implements PaymentClient {
         try {
           const response = await this.fetchFn(url, {
             method: 'POST',
-            headers: {
-              'content-type': 'application/json',
-              'x-request-id': request.traceId,
-              'x-idempotency-key': request.idempotencyKey,
-            },
+            headers: this.paymentHeaders(request.traceId, request.idempotencyKey),
             body: JSON.stringify(body),
             signal: AbortSignal.timeout(this.options.timeoutMs),
           });
@@ -142,6 +140,18 @@ export class HttpPaymentClient implements PaymentClient {
       }
       return transport;
     }
+  }
+
+  /** Invoice and charge require x-api-key. Health check is registered before that middleware. */
+  private paymentHeaders(traceId: string, idempotencyKey: string): Record<string, string> {
+    const headers: Record<string, string> = {
+      'content-type': 'application/json',
+      'x-request-id': traceId,
+      'x-idempotency-key': idempotencyKey,
+    };
+    const apiKey = this.options.apiKey?.trim();
+    if (apiKey) headers['x-api-key'] = apiKey;
+    return headers;
   }
 
   /** GET /payment-service/api/v2/healthCheck. A failed probe means the service is down. */
