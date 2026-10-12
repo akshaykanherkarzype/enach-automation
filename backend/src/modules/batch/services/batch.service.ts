@@ -496,6 +496,9 @@ export class BatchService {
         status: row.status,
         invoiceId: row.invoiceId,
         orderId: row.orderId,
+        invoiceStatus: row.invoiceStatus,
+        subscriptionRefId: row.subscriptionRefId,
+        paymentGatewayProvider: row.paymentGatewayProvider,
       })),
     };
 
@@ -526,6 +529,7 @@ export class BatchService {
         invoiceStatus: stored.invoiceStatus,
         subscriptionRefId: stored.subscriptionRefId,
         scheduledOn: stored.scheduledOn,
+        paymentGatewayProvider: stored.paymentGatewayProvider,
       };
     });
   }

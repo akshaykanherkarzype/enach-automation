@@ -20,6 +20,8 @@ export interface HostSample {
   cpuPct?: number;
   /** payment-service process event-loop lag, milliseconds. */
   eventLoopP99Ms?: number;
+  /** payment-service process RSS, mebibytes. */
+  paymentRssMb?: number;
 }
 
 export interface PressureThresholds {
@@ -31,11 +33,20 @@ export interface PressureThresholds {
   cpuPause: number;
   eventLoopSlowMs: number;
   eventLoopPauseMs: number;
+  paymentRssSlowMb: number;
+  paymentRssPauseMb: number;
 }
 
 export interface PressureDecision {
   level: PressureLevel;
   reasons: string[];
+  sample: HostSample;
+}
+
+export interface HostReading {
+  label: string;
+  value: string;
+  status: 'Usual' | 'Elevated' | 'Pause';
 }
 
 export interface PressureBudgetLimits {
@@ -44,7 +55,7 @@ export interface PressureBudgetLimits {
   maxGapMs: number;
 }
 
-const OK: PressureDecision = { level: 'ok', reasons: [] };
+const OK: PressureDecision = { level: 'ok', reasons: [], sample: {} };
 
 export function pressureThresholdsFromEnv(): PressureThresholds {
   return {
@@ -56,6 +67,8 @@ export function pressureThresholdsFromEnv(): PressureThresholds {
     cpuPause: env.HOST_CPU_PAUSE,
     eventLoopSlowMs: env.HOST_EVENT_LOOP_SLOW_MS,
     eventLoopPauseMs: env.HOST_EVENT_LOOP_PAUSE_MS,
+    paymentRssSlowMb: env.HOST_PAYMENT_RSS_SLOW_MB,
+    paymentRssPauseMb: env.HOST_PAYMENT_RSS_PAUSE_MB,
   };
 }
 
@@ -106,8 +119,64 @@ export function classifyPressure(
     'event loop',
     'ms',
   );
+  consider(
+    sample.paymentRssMb,
+    thresholds.paymentRssSlowMb,
+    thresholds.paymentRssPauseMb,
+    'payment service',
+    ' MB',
+  );
 
-  return { level, reasons };
+  return { level, reasons, sample };
+}
+
+function readingStatus(value: number | undefined, slowAt: number, pauseAt: number): HostReading['status'] {
+  if (value === undefined || !Number.isFinite(value) || value < slowAt) return 'Usual';
+  if (value >= pauseAt) return 'Pause';
+  return 'Elevated';
+}
+
+function readingValue(value: number | undefined, unit: string): string {
+  if (value === undefined || !Number.isFinite(value)) return '—';
+  if (unit === ' MB') {
+    if (value >= 1024) return `${(value / 1024).toFixed(1)} GB`;
+    return `${Math.round(value)} MB`;
+  }
+  return `${Math.round(value)}${unit}`;
+}
+
+/** Every host signal, including the ones still in the usual range. */
+export function hostReadings(
+  sample: HostSample,
+  thresholds: PressureThresholds = pressureThresholdsFromEnv(),
+): HostReading[] {
+  return [
+    {
+      label: 'Memory',
+      value: readingValue(sample.memoryPct, '%'),
+      status: readingStatus(sample.memoryPct, thresholds.memorySlow, thresholds.memoryPause),
+    },
+    {
+      label: 'Disk',
+      value: readingValue(sample.diskPct, '%'),
+      status: readingStatus(sample.diskPct, thresholds.diskSlow, thresholds.diskPause),
+    },
+    {
+      label: 'CPU',
+      value: readingValue(sample.cpuPct, '%'),
+      status: readingStatus(sample.cpuPct, thresholds.cpuSlow, thresholds.cpuPause),
+    },
+    {
+      label: 'Event loop',
+      value: readingValue(sample.eventLoopP99Ms, ' ms'),
+      status: readingStatus(sample.eventLoopP99Ms, thresholds.eventLoopSlowMs, thresholds.eventLoopPauseMs),
+    },
+    {
+      label: 'Payment service',
+      value: readingValue(sample.paymentRssMb, ' MB'),
+      status: readingStatus(sample.paymentRssMb, thresholds.paymentRssSlowMb, thresholds.paymentRssPauseMb),
+    },
+  ];
 }
 
 /** First sample of a Prometheus instant-query response. */
@@ -161,12 +230,13 @@ export function applyPressureToBudget(
   };
 }
 
-function hostQueries(instance: string): { memory: string; disk: string; cpu: string } {
+function hostQueries(instance: string): { memory: string; disk: string; cpu: string; paymentRss: string } {
   const host = instance.replace(/"/g, '');
   return {
     memory: `((node_memory_MemTotal_bytes{instance="${host}"} - node_memory_MemAvailable_bytes{instance="${host}"}) / node_memory_MemTotal_bytes{instance="${host}"}) * 100`,
     disk: `100 - ((node_filesystem_avail_bytes{instance="${host}",mountpoint="/",fstype!="rootfs"} / node_filesystem_size_bytes{instance="${host}",mountpoint="/",fstype!="rootfs"}) * 100)`,
     cpu: `100 - (avg by (instance) (irate(node_cpu_seconds_total{mode="idle",instance="${host}"}[5m])) * 100)`,
+    paymentRss: `max(pm2_memory{instance="${host}",name="payment-service"})`,
   };
 }
 
@@ -181,8 +251,8 @@ async function sampleHost(): Promise<HostSample> {
   const base = env.GRAFANA_PROMETHEUS_URL.trim().replace(/\/$/, '');
   if (base) {
     const queries = hostQueries(env.HOST_METRICS_INSTANCE);
-    const [memory, disk, cpu] = await Promise.all(
-      [queries.memory, queries.disk, queries.cpu].map(async (query) => {
+    const [memory, disk, cpu, paymentRss] = await Promise.all(
+      [queries.memory, queries.disk, queries.cpu, queries.paymentRss].map(async (query) => {
         try {
           const body = await readJson(`${base}/api/v1/query?query=${encodeURIComponent(query)}`);
           return prometheusValue(body);
@@ -195,6 +265,7 @@ async function sampleHost(): Promise<HostSample> {
     sample.memoryPct = memory;
     sample.diskPct = disk;
     sample.cpuPct = cpu;
+    if (paymentRss !== undefined) sample.paymentRssMb = paymentRss / (1024 * 1024);
   }
 
   const origin = env.PAYMENT_SERVICE_BASE_URL.trim().replace(/\/$/, '');
@@ -216,13 +287,19 @@ interface StoredPressure {
 
 function parseStored(raw: string): StoredPressure | null {
   try {
-    const value = JSON.parse(raw) as { at?: number; level?: PressureLevel; reasons?: string[] };
+    const value = JSON.parse(raw) as {
+      at?: number;
+      level?: PressureLevel;
+      reasons?: string[];
+      sample?: HostSample;
+    };
     if (!value || typeof value.at !== 'number' || (value.level !== 'ok' && value.level !== 'slow' && value.level !== 'pause')) {
       return null;
     }
+    const sample = value.sample && typeof value.sample === 'object' ? value.sample : {};
     return {
       at: value.at,
-      decision: { level: value.level, reasons: Array.isArray(value.reasons) ? value.reasons : [] },
+      decision: { level: value.level, reasons: Array.isArray(value.reasons) ? value.reasons : [], sample },
     };
   } catch {
     return null;
@@ -251,7 +328,12 @@ export async function currentPressure(now = Date.now()): Promise<PressureDecisio
 
     const decision = classifyPressure(await sampleHost());
     const next = { at: now, decision };
-    await redis.set(STATE_KEY, JSON.stringify({ at: now, level: decision.level, reasons: decision.reasons }), 'EX', 180);
+    await redis.set(
+      STATE_KEY,
+      JSON.stringify({ at: now, level: decision.level, reasons: decision.reasons, sample: decision.sample }),
+      'EX',
+      180,
+    );
     const previous = local?.decision.level;
     local = next;
     if (decision.level !== 'ok') {
@@ -263,5 +345,41 @@ export async function currentPressure(now = Date.now()): Promise<PressureDecisio
   } catch (err) {
     logger.warn({ err }, 'Host pressure check failed; keeping the normal pace');
     return local?.decision ?? OK;
+  }
+}
+
+export interface HostSnapshot {
+  instance: string;
+  level: PressureLevel;
+  readings: HostReading[];
+  sampledAt: string;
+}
+
+export function presentHost(sample: HostSample, instance: string, at = new Date()): HostSnapshot {
+  return {
+    instance,
+    level: classifyPressure(sample).level,
+    readings: hostReadings(sample),
+    sampledAt: at.toISOString(),
+  };
+}
+
+function sampleHasReading(sample: HostSample): boolean {
+  return [sample.memoryPct, sample.diskPct, sample.cpuPct, sample.eventLoopP99Ms, sample.paymentRssMb].some(
+    (value) => value !== undefined,
+  );
+}
+
+/** Current respo-prod gauges for the dashboard. Uses the shared sample while it is fresh. */
+export async function liveHostMetrics(now = Date.now()): Promise<HostSnapshot> {
+  const decision = await currentPressure(now);
+  if (sampleHasReading(decision.sample)) {
+    return presentHost(decision.sample, env.HOST_METRICS_INSTANCE, new Date(now));
+  }
+  try {
+    return presentHost(await sampleHost(), env.HOST_METRICS_INSTANCE, new Date(now));
+  } catch (err) {
+    logger.warn({ err }, 'Live host metrics were not available');
+    return presentHost({}, env.HOST_METRICS_INSTANCE, new Date(now));
   }
 }

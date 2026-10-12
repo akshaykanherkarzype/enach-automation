@@ -6,7 +6,7 @@ import { redis } from '../../../infrastructure/redis/client.js';
 import { batchRepository } from '../repositories/batch.repository.js';
 
 export type NoticeEpisode = 'payment' | 'peak' | 'host';
-export type NoticeState = 'down' | 'up' | 'paused' | 'running';
+export type NoticeState = 'down' | 'up' | 'paused' | 'running' | 'watch' | 'settling';
 
 const NOTICE_TTL_SECONDS = 48 * 60 * 60;
 
@@ -15,9 +15,12 @@ const NOTICE_TTL_SECONDS = 48 * 60 * 60;
  * only after that pause. A later pause can be announced again.
  */
 export function shouldNotifyTransition(current: string | null, next: NoticeState): boolean {
-  if (next === 'down' || next === 'paused') return current !== next;
-  if (next === 'up') return current === 'down';
-  return current === 'paused';
+  const previous = current ?? '';
+  if (next === 'down' || next === 'paused') return previous !== next;
+  if (next === 'watch') return previous === '' || previous === 'running';
+  if (next === 'settling') return previous === 'down';
+  if (next === 'up') return previous === 'down' || previous === 'settling';
+  return previous === 'paused' || previous === 'watch';
 }
 
 const CLAIM_SCRIPT = `
@@ -27,10 +30,14 @@ local next = ARGV[1]
 local allow = 0
 if next == 'down' or next == 'paused' then
   if current ~= next then allow = 1 end
-elseif next == 'up' then
+elseif next == 'watch' then
+  if current == '' or current == 'running' then allow = 1 end
+elseif next == 'settling' then
   if current == 'down' then allow = 1 end
+elseif next == 'up' then
+  if current == 'down' or current == 'settling' then allow = 1 end
 elseif next == 'running' then
-  if current == 'paused' then allow = 1 end
+  if current == 'paused' or current == 'watch' then allow = 1 end
 end
 if allow == 0 then return 'NO' end
 redis.call('SET', KEYS[1], next, 'EX', ARGV[2])
@@ -71,6 +78,7 @@ export async function notifyBatchEpisode(input: {
   customerId?: string;
   responseCode?: string;
   traceId?: string;
+  readings?: Array<{ label: string; value: string; status: string }>;
 }): Promise<void> {
   const key = noticeKey(input.batchId, input.episode);
   let claim: { claimed: boolean; previous: string };
@@ -89,11 +97,15 @@ export async function notifyBatchEpisode(input: {
       input.episode === 'payment'
         ? input.next === 'down'
           ? 'payment_paused'
-          : 'payment_resumed'
+          : input.next === 'settling'
+            ? 'payment_settling'
+            : 'payment_resumed'
         : input.episode === 'host'
           ? input.next === 'paused'
             ? 'host_paused'
-            : 'host_resumed'
+            : input.next === 'watch'
+              ? 'host_elevated'
+              : 'host_resumed'
           : input.next === 'paused'
             ? 'peak_paused'
             : 'peak_resumed';
@@ -112,6 +124,7 @@ export async function notifyBatchEpisode(input: {
       customerId: input.customerId,
       responseCode: input.responseCode,
       traceId: input.traceId,
+      readings: input.readings,
     });
   } catch (err) {
     logger.error(

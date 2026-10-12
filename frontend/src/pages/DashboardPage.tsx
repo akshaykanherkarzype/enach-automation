@@ -22,12 +22,12 @@ const MODULES: Array<{ slug: BatchModuleSlug; label: string; hint: string }> = [
   {
     slug: 'invoice-generation',
     label: 'Invoice generation',
-    hint: 'Create UPI autopay invoices for the customers in the file.',
+    hint: 'Create UPI autopay invoices for the customers in the file. The same pause, host, and completion mails are sent for this module.',
   },
   {
     slug: 'invoice-charge',
     label: 'Invoice charge',
-    hint: 'Charge unpaid UPI invoices for the customers in the file.',
+    hint: 'Charge unpaid UPI invoices for the customers in the file. Start, peak, host, outage, and completion mails match invoice generation.',
   },
 ];
 

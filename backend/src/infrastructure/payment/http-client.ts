@@ -1,13 +1,22 @@
+import {
+  applyHealthProbe,
+  holdBeforeCall,
+  type HealthRecoveryStore,
+} from './health-recovery.js';
 import { PaymentPayloadError, buildSingleCustomerPayload } from './payload.js';
 import {
   HEALTH_CACHE_MS,
+  HEALTH_DEFER_MS,
   HEALTH_PATH,
   HEALTH_PROBE_TIMEOUT_MS,
   UPI_PATHS,
+  deferWhileGatewaySaturated,
   deferWhilePaymentServiceDown,
+  deferWhilePaymentServiceSettles,
   interpretPaymentHttpResponse,
   interpretSlotBusy,
   interpretTransportError,
+  isGatewaySaturation,
   isHealthUp,
   needsHealthProbe,
 } from './retry-policy.js';
@@ -30,6 +39,10 @@ export interface HttpPaymentClientOptions {
   onRateLimit?: (delayMs: number) => void;
   /** Sent as x-api-key on the invoice and charge calls. Health check does not use it. */
   apiKey?: string;
+  /** Shared outage state. Absent in tests that only check one response. */
+  healthStore?: HealthRecoveryStore;
+  /** How long to wait after health returns UP. */
+  settleMs?: number;
 }
 
 /**
@@ -44,6 +57,37 @@ export class HttpPaymentClient implements PaymentClient {
   constructor(private readonly options: HttpPaymentClientOptions) {
     this.fetchFn = options.fetchFn ?? fetch;
     this.pace = options.pace ?? ((work) => work());
+  }
+
+  /**
+   * While the service is down or configuration is still loading, do not post a customer.
+   * A down service is checked with healthCheck. The first UP starts the settle window.
+   */
+  async recoveryHold(traceId: string): Promise<{ delayMs: number; reason: string } | null> {
+    const store = this.options.healthStore;
+    if (!store) return null;
+    const now = Date.now();
+    let current: Awaited<ReturnType<HealthRecoveryStore['load']>>;
+    try {
+      current = await store.load();
+    } catch {
+      return null;
+    }
+    const waiting = holdBeforeCall(current, now);
+    if (waiting) return waiting;
+    if (current?.phase === 'settling') {
+      try {
+        await store.save(null);
+      } catch {
+        /* the next probe records the state again */
+      }
+      return null;
+    }
+    if (current?.phase !== 'down') return null;
+
+    const origin = this.options.baseUrl.replace(/\/$/, '');
+    const up = await this.paymentServiceIsUp(origin, traceId);
+    return this.recordProbe(up, now);
   }
 
   async execute(request: PaymentRequest): Promise<PaymentResponse> {
@@ -111,9 +155,22 @@ export class HttpPaymentClient implements PaymentClient {
 
       if (result.retryable && needsHealthProbe(result.statusCode, result.body)) {
         const up = await this.paymentServiceIsUp(origin, request.traceId);
+        const held = await this.recordProbe(up, Date.now());
         if (!up) {
           return {
             ...deferWhilePaymentServiceDown(result),
+            latencyMs: Date.now() - start,
+          };
+        }
+        if (held?.reason === 'PAYMENT_SERVICE_SETTLING') {
+          return {
+            ...deferWhilePaymentServiceSettles(held.delayMs, result),
+            latencyMs: Date.now() - start,
+          };
+        }
+        if (isGatewaySaturation(result.statusCode)) {
+          return {
+            ...deferWhileGatewaySaturated(result),
             latencyMs: Date.now() - start,
           };
         }
@@ -132,9 +189,16 @@ export class HttpPaymentClient implements PaymentClient {
       };
       if (transport.latencyMs > 0) this.options.onLatency?.(transport.latencyMs);
       const up = await this.paymentServiceIsUp(origin, request.traceId);
+      const held = await this.recordProbe(up, Date.now());
       if (!up) {
         return {
           ...deferWhilePaymentServiceDown(transport),
+          latencyMs: Date.now() - start,
+        };
+      }
+      if (held?.reason === 'PAYMENT_SERVICE_SETTLING') {
+        return {
+          ...deferWhilePaymentServiceSettles(held.delayMs, transport),
           latencyMs: Date.now() - start,
         };
       }
@@ -152,6 +216,28 @@ export class HttpPaymentClient implements PaymentClient {
     const apiKey = this.options.apiKey?.trim();
     if (apiKey) headers['x-api-key'] = apiKey;
     return headers;
+  }
+
+  private async recordProbe(
+    up: boolean,
+    now: number,
+  ): Promise<{ delayMs: number; reason: string } | null> {
+    const store = this.options.healthStore;
+    if (!store) return up ? null : { delayMs: HEALTH_DEFER_MS, reason: 'PAYMENT_SERVICE_UNAVAILABLE' };
+    try {
+      const current = await store.load();
+      const applied = applyHealthProbe(
+        current,
+        up,
+        now,
+        this.options.settleMs ?? 60_000,
+        HEALTH_DEFER_MS,
+      );
+      await store.save(applied.next);
+      return applied.hold;
+    } catch {
+      return up ? null : { delayMs: HEALTH_DEFER_MS, reason: 'PAYMENT_SERVICE_UNAVAILABLE' };
+    }
   }
 
   /** GET /payment-service/api/v2/healthCheck. A failed probe means the service is down. */

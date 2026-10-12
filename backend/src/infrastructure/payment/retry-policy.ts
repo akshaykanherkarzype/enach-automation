@@ -228,6 +228,22 @@ export function isHealthUp(statusCode: number, body: unknown): boolean {
   return String(record.status ?? '').toUpperCase() === HEALTH_UP_STATUS;
 }
 
+/** Health is UP after an outage. Hold calls so configuration can load. Does not use MAX_RETRY. */
+export function deferWhilePaymentServiceSettles(delayMs: number, previous: Interpreted): Interpreted {
+  return {
+    success: false,
+    retryable: false,
+    deferred: true,
+    deferDelayMs: Math.max(1_000, delayMs),
+    statusCode: previous.statusCode,
+    responseCode: 'PAYMENT_SERVICE_SETTLING',
+    body: {
+      message: 'Payment-service health is UP. Calls are held so configuration can finish loading.',
+      cause: previous.responseCode || `HTTP_${previous.statusCode}`,
+    },
+  };
+}
+
 /** Service is down. Requeue without counting this against MAX_RETRY. */
 export function deferWhilePaymentServiceDown(previous: Interpreted): Interpreted {
   const cause = previous.responseCode || `HTTP_${previous.statusCode}`;
@@ -243,6 +259,30 @@ export function deferWhilePaymentServiceDown(previous: Interpreted): Interpreted
       cause,
       message:
         'Payment-service healthCheck did not return status UP. The customer will be tried again without using a retry.',
+    },
+  };
+}
+
+/** Nginx returned 502/504 while the process was still up. The first gateway call may still be running. */
+export const GATEWAY_SATURATED_DEFER_MS = 90_000;
+
+export function isGatewaySaturation(statusCode: number): boolean {
+  return statusCode === 502 || statusCode === 504;
+}
+
+export function deferWhileGatewaySaturated(previous: Interpreted): Interpreted {
+  const cause = previous.responseCode || `HTTP_${previous.statusCode}`;
+  return {
+    success: false,
+    retryable: false,
+    deferred: true,
+    deferDelayMs: GATEWAY_SATURATED_DEFER_MS,
+    statusCode: previous.statusCode,
+    responseCode: 'GATEWAY_TIMEOUT',
+    body: {
+      cause,
+      message:
+        'The gateway timed out while payment-service was still up. This customer is held so the same charge is not sent again while the first call may still be running.',
     },
   };
 }

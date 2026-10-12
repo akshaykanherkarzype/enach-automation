@@ -44,6 +44,8 @@ export async function batchRoutes(app: FastifyInstance): Promise<void> {
     (req, reply) => batchController.cancel(req, reply),
   );
 
+  app.get('/host/metrics', (req, reply) => batchController.hostMetrics(req, reply));
+
   app.get('/batches/:id/download/:type', (req, reply) =>
     batchController.download(req, reply),
   );

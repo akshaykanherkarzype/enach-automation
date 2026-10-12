@@ -41,6 +41,7 @@ export interface FailedReportRow {
   invoiceStatus: string;
   subscriptionRefId: string;
   scheduledOn: string;
+  paymentGatewayProvider: string;
 }
 
 export interface StoredPaymentFields {
@@ -49,6 +50,7 @@ export interface StoredPaymentFields {
   invoiceStatus: string;
   subscriptionRefId: string;
   scheduledOn: string;
+  paymentGatewayProvider: string;
 }
 
 function textField(record: Record<string, unknown>, key: string): string {
@@ -76,6 +78,7 @@ export function storedPaymentFields(raw: string | null | undefined): StoredPayme
     invoiceStatus: textField(record, 'invoiceStatus'),
     subscriptionRefId: textField(record, 'subscriptionRefId'),
     scheduledOn: textField(record, 'scheduledOn'),
+    paymentGatewayProvider: textField(record, 'paymentGatewayProvider'),
   };
 }
 

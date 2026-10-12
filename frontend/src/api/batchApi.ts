@@ -134,3 +134,21 @@ export async function downloadReport(id: string, type: 'original' | 'processed' 
   const { data } = await api.get(`/batches/${id}/download/${type}`);
   return data as { url: string; key: string; filename?: string };
 }
+
+export interface HostReading {
+  label: string;
+  value: string;
+  status: 'Usual' | 'Elevated' | 'Pause';
+}
+
+export interface HostSnapshot {
+  instance: string;
+  level: 'ok' | 'slow' | 'pause';
+  readings: HostReading[];
+  sampledAt: string;
+}
+
+export async function getHostMetrics() {
+  const { data } = await api.get('/host/metrics');
+  return data as HostSnapshot;
+}

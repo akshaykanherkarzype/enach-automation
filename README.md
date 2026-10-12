@@ -337,7 +337,9 @@ One mail per event, to the uploader and `BATCH_REPORT_EMAIL`. A local `admin@zyp
 | the next call finds health UP again | Resumed |
 | a peak window starts holding calls | Paused until the window ends |
 | the first customer is allowed after that window | Resumed |
-| host pressure crosses a pause line | Paused, with the signal |
+| host memory, disk, CPU, or event loop rises above the usual line | Slowed, with each reading |
+| host pressure crosses a pause line | Paused, with memory, disk, CPU, and event-loop readings |
+| payment-service health returns UP after an outage | Waiting, so configuration can load, then Resumed when the first call gets through |
 | every signal is back under the slow line | Resumed |
 | the batch finishes | Final report. The HTML shows up to 5 sample failures. `failed.csv` is attached with every failed customer |
 

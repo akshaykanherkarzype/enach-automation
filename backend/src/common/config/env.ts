@@ -77,6 +77,8 @@ const envSchema = z.object({
     .string()
     .optional()
     .transform((v) => v === undefined || v === '' || v === 'true' || v === '1'),
+  /** After health returns UP, wait before the next invoice or charge call. */
+  PAYMENT_RECOVER_SETTLE_MS: z.coerce.number().min(0).default(60_000),
   HOST_PRESSURE: z
     .string()
     .optional()
@@ -93,6 +95,9 @@ const envSchema = z.object({
   HOST_CPU_PAUSE: z.coerce.number().min(1).max(100).default(90),
   HOST_EVENT_LOOP_SLOW_MS: z.coerce.number().min(1).default(250),
   HOST_EVENT_LOOP_PAUSE_MS: z.coerce.number().min(1).default(1_000),
+  /** payment-service RSS. Idle on respo-prod is about 700 MB. 1.5 GB pauses before the process fills the host. */
+  HOST_PAYMENT_RSS_SLOW_MB: z.coerce.number().min(1).default(1024),
+  HOST_PAYMENT_RSS_PAUSE_MB: z.coerce.number().min(1).default(1536),
   PAYMENT_SLOT_WAIT_MS: z.coerce.number().min(1000).default(600_000),
   PAYMENT_CALL_BUDGET_MS: z.coerce.number().min(0).default(2500),
   PEAK_WINDOWS_IST: z.string().default('10:00-13:00,17:00-22:00'),

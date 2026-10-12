@@ -30,4 +30,6 @@ export interface PaymentResponse {
 
 export interface PaymentClient {
   execute(request: PaymentRequest): Promise<PaymentResponse>;
+  /** Hold invoice and charge calls while payment-service is down or still loading. */
+  recoveryHold?(traceId: string): Promise<{ delayMs: number; reason: string } | null>;
 }

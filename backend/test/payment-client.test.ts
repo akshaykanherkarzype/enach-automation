@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { memoryHealthStore } from '../src/infrastructure/payment/health-recovery.js';
 import {
   buildSingleCustomerPayload,
   PaymentPayloadError,
@@ -236,6 +237,37 @@ test('a charge before the scheduled day waits until that IST midnight', () => {
   assert.equal(chargeFail.invoiceId, 'INV-CHARGE');
   assert.equal(chargeFail.orderId, 'ORD-CHARGE');
   assert.equal(chargeFail.invoiceStatus, 'UNPAID');
+
+  const providerFail = interpretPaymentHttpResponse(
+    400,
+    {
+      status: 'failed',
+      message: 'CANNOT_CHARGE_SUBSCRIPTION_PLAN',
+      retryable: false,
+      data: {
+        customerId: '8840034',
+        paymentGatewayProvider: 'BILLDESK',
+        autopayOrder: { invoiceId: 'INV-CHARGE', orderId: 'ORD-CHARGE', status: 'PENDING' },
+      },
+    },
+    'charge',
+  );
+  assert.equal(providerFail.success, false);
+  assert.equal(providerFail.retryable, false);
+  assert.equal(providerFail.responseCode, 'CANNOT_CHARGE_SUBSCRIPTION_PLAN');
+
+  const retryableCharge = interpretPaymentHttpResponse(
+    400,
+    {
+      status: 'failed',
+      message: 'CANNOT_CHARGE_SUBSCRIPTION_PLAN',
+      retryable: true,
+      data: { autopayOrder: { status: 'INITIALIZED' } },
+    },
+    'charge',
+  );
+  assert.equal(retryableCharge.success, false);
+  assert.equal(retryableCharge.retryable, true);
   assert.equal(chargeFail.subscriptionRefId, 'SUB-1');
 });
 
@@ -309,9 +341,10 @@ test('http client posts one customer and honors success, retryable, and socket e
     traceId: 'trace-2',
   });
   assert.equal(failed.success, false);
-  assert.equal(failed.retryable, true);
-  assert.equal(failed.deferred, undefined);
-  assert.equal(failed.responseCode, 'HTTP_502');
+  assert.equal(failed.retryable, false);
+  assert.equal(failed.deferred, true);
+  assert.equal(failed.responseCode, 'GATEWAY_TIMEOUT');
+  assert.equal(failed.deferDelayMs, 90_000);
 
   const permanent = new HttpPaymentClient({
     baseUrl: 'http://payment.test',
@@ -447,6 +480,37 @@ test('a 502 while healthCheck is down is deferred and does not use a retry', asy
   assert.equal(isHealthUp(200, { status: 'DOWN' }), false);
   assert.equal(needsHealthProbe(429, 'Too many requests'), false);
   assert.equal(isHealthUp(502, { status: 'UP' }), false);
+});
+
+test('health UP after an outage holds the next call and does not post a customer', async () => {
+  const store = memoryHealthStore({ phase: 'down', until: 0 });
+  const calls: string[] = [];
+  const client = new HttpPaymentClient({
+    baseUrl: 'http://payment.test',
+    timeoutMs: 1000,
+    settleMs: 60_000,
+    healthStore: store,
+    pace: async (work) => work(),
+    fetchFn: async (url) => {
+      calls.push(String(url));
+      if (String(url).endsWith(HEALTH_PATH)) {
+        return new Response(JSON.stringify({ status: 'UP', message: 'Payment Service is UP' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response('upstream', { status: 502 });
+    },
+  });
+
+  const held = await client.recoveryHold('trace-recover');
+  assert.equal(held?.reason, 'PAYMENT_SERVICE_SETTLING');
+  assert.equal(held?.delayMs, 60_000);
+  assert.deepEqual(calls, [`http://payment.test${HEALTH_PATH}`]);
+
+  const again = await client.recoveryHold('trace-recover-2');
+  assert.equal(again?.reason, 'PAYMENT_SERVICE_SETTLING');
+  assert.equal(calls.length, 1);
 });
 
 test('a rate limit waits out the window and does not use a retry', async () => {

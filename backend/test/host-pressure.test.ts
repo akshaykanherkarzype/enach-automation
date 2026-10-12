@@ -4,6 +4,8 @@ import {
   applyPressureToBudget,
   classifyPressure,
   eventLoopLagMs,
+  hostReadings,
+  presentHost,
   prometheusValue,
   type PressureThresholds,
 } from '../src/infrastructure/payment/host-pressure.js';
@@ -17,6 +19,8 @@ const thresholds: PressureThresholds = {
   cpuPause: 90,
   eventLoopSlowMs: 250,
   eventLoopPauseMs: 1_000,
+  paymentRssSlowMb: 1024,
+  paymentRssPauseMb: 1536,
 };
 
 const limits = { maxInFlight: 8, minGapMs: 125, maxGapMs: 2_000 };
@@ -34,6 +38,13 @@ test('a high host signal slows the batch, and a critical one pauses it', () => {
   const slow = classifyPressure({ memoryPct: 82, diskPct: 28, cpuPct: 40 }, thresholds);
   assert.equal(slow.level, 'slow');
   assert.deepEqual(slow.reasons, ['memory 82%']);
+  assert.equal(slow.sample.memoryPct, 82);
+
+  const readings = hostReadings({ memoryPct: 82, diskPct: 28, cpuPct: 76, eventLoopP99Ms: 40 }, thresholds);
+  assert.deepEqual(
+    readings.map((row) => row.status),
+    ['Elevated', 'Usual', 'Elevated', 'Usual', 'Usual'],
+  );
 
   const paused = classifyPressure({ memoryPct: 91, diskPct: 93, cpuPct: 40 }, thresholds);
   assert.equal(paused.level, 'pause');
@@ -42,6 +53,34 @@ test('a high host signal slows the batch, and a critical one pauses it', () => {
   const loop = classifyPressure({ eventLoopP99Ms: 1_200 }, thresholds);
   assert.equal(loop.level, 'pause');
   assert.deepEqual(loop.reasons, ['event loop 1200ms']);
+});
+
+test('payment-service memory pauses calls while the host still looks ordinary', () => {
+  const rising = classifyPressure({ memoryPct: 45, diskPct: 20, cpuPct: 26, paymentRssMb: 1100 }, thresholds);
+  assert.equal(rising.level, 'slow');
+  assert.deepEqual(rising.reasons, ['payment service 1100 MB']);
+
+  const full = classifyPressure({ memoryPct: 45, diskPct: 20, cpuPct: 26, paymentRssMb: 1800 }, thresholds);
+  assert.equal(full.level, 'pause');
+  assert.deepEqual(full.reasons, ['payment service 1800 MB']);
+
+  const reading = hostReadings({ paymentRssMb: 1800 }, thresholds).find((row) => row.label === 'Payment service');
+  assert.equal(reading?.value, '1.8 GB');
+  assert.equal(reading?.status, 'Pause');
+});
+
+test('a live host snapshot names the instance and every reading', () => {
+  const snapshot = presentHost(
+    { memoryPct: 57.4, diskPct: 28.1, cpuPct: 31.8, eventLoopP99Ms: 11 },
+    'respo-prod',
+    new Date('2026-10-09T11:40:00.000Z'),
+  );
+  assert.equal(snapshot.instance, 'respo-prod');
+  assert.equal(snapshot.level, 'ok');
+  assert.equal(snapshot.readings.length, 5);
+  assert.equal(snapshot.readings[0].label, 'Memory');
+  assert.equal(snapshot.readings[2].value, '32%');
+  assert.equal(snapshot.sampledAt, '2026-10-09T11:40:00.000Z');
 });
 
 test('a missing signal is ignored', () => {

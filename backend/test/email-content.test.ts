@@ -108,6 +108,8 @@ test('a start notice says how many customers were queued', () => {
         status: 'FAILED',
         invoiceId: 'INV-1',
         orderId: 'ORD-1',
+        invoiceStatus: 'UNPAID',
+        paymentGatewayProvider: 'BILLDESK',
       },
     ],
   });
@@ -115,6 +117,9 @@ test('a start notice says how many customers were queued', () => {
   assert.match(finished.text, /trace-fail-1/);
   assert.match(finished.text, /INV-1/);
   assert.match(finished.text, /ORD-1/);
+  assert.match(finished.text, /BILLDESK/);
+  assert.match(finished.html, /BILLDESK/);
+  assert.match(finished.html, /CANNOT_CHARGE_SUBSCRIPTION_PLAN/);
   assert.match(finished.text, /every failed customer is in the attachment/);
   assert.match(finished.text, /7 more in the attachment/);
   assert.match(finished.html, /Sample failures/);
@@ -132,6 +137,13 @@ test('progress notices are sent once per outage or peak window and show remainin
   assert.equal(shouldNotifyTransition(null, 'paused'), true);
   assert.equal(shouldNotifyTransition('paused', 'paused'), false);
   assert.equal(shouldNotifyTransition('paused', 'running'), true);
+  assert.equal(shouldNotifyTransition(null, 'watch'), true);
+  assert.equal(shouldNotifyTransition('watch', 'watch'), false);
+  assert.equal(shouldNotifyTransition('watch', 'running'), true);
+  assert.equal(shouldNotifyTransition('paused', 'watch'), false);
+  assert.equal(shouldNotifyTransition('down', 'settling'), true);
+  assert.equal(shouldNotifyTransition('settling', 'up'), true);
+  assert.equal(shouldNotifyTransition(null, 'settling'), false);
   assert.equal(shouldNotifyTransition(null, 'running'), false);
 
   const paused = buildProgressMail({
@@ -210,6 +222,47 @@ test('progress notices are sent once per outage or peak window and show remainin
   assert.match(host.subject, /Paused — host under pressure/);
   assert.match(host.text, /Signal: memory 91%, cpu 92%/);
   assert.match(host.text, /not marked failed/);
+
+  const elevated = buildProgressMail({
+    to: 'ops@getzype.com',
+    module: 'INVOICE_GENERATION',
+    batchId: '9',
+    kind: 'host_elevated',
+    total: 750,
+    success: 100,
+    failed: 2,
+    remaining: 648,
+    cause: 'memory 82%, cpu 76%',
+    readings: [
+      { label: 'Memory', value: '82%', status: 'Elevated' },
+      { label: 'Disk', value: '28%', status: 'Usual' },
+      { label: 'CPU', value: '76%', status: 'Elevated' },
+      { label: 'Event loop', value: '40 ms', status: 'Usual' },
+    ],
+  });
+  assert.match(elevated.subject, /Slowed — host above usual load/);
+  assert.match(elevated.text, /Memory: 82% \(Elevated\)/);
+  assert.match(elevated.text, /Disk: 28% \(Usual\)/);
+  assert.match(elevated.text, /CPU: 76% \(Elevated\)/);
+  assert.match(elevated.html, /Host readings/);
+  assert.match(elevated.html, /slower pace/);
+
+  const settling = buildProgressMail({
+    to: 'ops@getzype.com',
+    module: 'INVOICE_CHARGE',
+    batchId: '9',
+    kind: 'payment_settling',
+    total: 750,
+    success: 100,
+    failed: 0,
+    remaining: 650,
+    resumesAt: '09 Oct 2026, 17:31 IST',
+    cause: 'HTTP_502',
+  });
+  assert.match(settling.subject, /Waiting — payment-service is back/);
+  assert.match(settling.text, /configuration can finish loading/);
+  assert.match(settling.text, /Resumes: 09 Oct 2026, 17:31 IST/);
+  assert.match(settling.html, /Configuration loading/);
 });
 
 test('completion mail skips the local admin login', () => {

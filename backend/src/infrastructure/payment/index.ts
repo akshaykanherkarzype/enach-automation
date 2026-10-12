@@ -1,6 +1,7 @@
 import { env } from '../../common/config/env.js';
 import { logger } from '../../common/logger/logger.js';
 import { notePaymentLatency, noteRateLimited } from './adaptive-pace.js';
+import { redisHealthStore } from './health-recovery.js';
 import { HttpPaymentClient } from './http-client.js';
 import { MockPaymentClient } from './mock-client.js';
 import { pacePaymentCall } from './pacer.js';
@@ -32,6 +33,8 @@ export function createPaymentClient(): PaymentClient {
       onRateLimit: (delayMs) => {
         void noteRateLimited(delayMs);
       },
+      healthStore: redisHealthStore(),
+      settleMs: env.PAYMENT_RECOVER_SETTLE_MS,
     });
   }
   return new MockPaymentClient();

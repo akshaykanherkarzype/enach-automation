@@ -4,6 +4,7 @@ import { ValidationError } from '../../../common/exceptions/app-error.js';
 import { env } from '../../../common/config/env.js';
 import { validateUploadFile } from '../validators/file-validator.js';
 import { batchService } from '../services/batch.service.js';
+import { liveHostMetrics } from '../../../infrastructure/payment/host-pressure.js';
 import type { DownloadType } from '../dto/types.js';
 
 function parseModule(raw: string): BatchModule {
@@ -125,6 +126,10 @@ export class BatchController {
     const { id } = request.params as { id: string };
     const result = await batchService.cancel(BigInt(id), request.user.email);
     return reply.send(result);
+  }
+
+  async hostMetrics(_request: FastifyRequest, reply: FastifyReply) {
+    return reply.send(await liveHostMetrics());
   }
 
   async download(request: FastifyRequest, reply: FastifyReply) {

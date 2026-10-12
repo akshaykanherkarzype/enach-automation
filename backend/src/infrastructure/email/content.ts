@@ -21,6 +21,9 @@ export interface BatchCompletionEmail {
     status?: string;
     invoiceId?: string;
     orderId?: string;
+    invoiceStatus?: string;
+    subscriptionRefId?: string;
+    paymentGatewayProvider?: string;
   }>;
 }
 
@@ -146,7 +149,7 @@ function successNote(module: string): string {
 
 function attachmentNote(payload: BatchCompletionEmail, filename: string): string {
   if (payload.failed <= 0) return 'No failed records for this batch.';
-  return `${filename} is attached and lists every failed customer, with status, failure reason, invoice id, order id, and trace ID. The sample below shows only the first few.`;
+  return `${filename} is attached and lists every failed customer, with status, response code, failure reason, invoice id, order id, provider, and trace ID. The sample below shows only the first few.`;
 }
 
 function metricCell(label: string, value: string, color: string): string {
@@ -316,7 +319,9 @@ export type ProgressNoticeKind =
   | 'peak_paused'
   | 'peak_resumed'
   | 'host_paused'
-  | 'host_resumed';
+  | 'host_elevated'
+  | 'host_resumed'
+  | 'payment_settling';
 
 export interface BatchProgressEmail {
   to: string;
@@ -342,6 +347,8 @@ export interface BatchProgressEmail {
   customerId?: string;
   responseCode?: string;
   traceId?: string;
+  /** Host gauges for an elevated or paused payment host. */
+  readings?: Array<{ label: string; value: string; status: string }>;
 }
 
 interface ProgressCopy {
@@ -436,6 +443,38 @@ function progressCopy(payload: BatchProgressEmail): ProgressCopy {
           'The peak window has ended. Calls have resumed for the customers still waiting.',
         next: 'This notice is sent once for this window. The completion report is sent when the batch finishes.',
       };
+    case 'payment_settling':
+      return {
+        subjectEvent: 'Waiting — payment-service is back',
+        badge: 'Configuration loading',
+        title: `${label} is waiting`,
+        tone: {
+          label: 'Waiting',
+          color: '#9a6700',
+          background: '#fff6e0',
+          accent: '#C2410C',
+          intro: '',
+        },
+        intro:
+          'Payment-service health is UP again after the outage. New invoice and charge calls are held for a short time so its configuration can finish loading. Calling the moment health returns can still fail.',
+        next: 'This notice is sent once for this recovery. Calls resume on their own when the wait ends. A separate email is sent when the first call gets through.',
+      };
+    case 'host_elevated':
+      return {
+        subjectEvent: 'Slowed — host above usual load',
+        badge: 'Host elevated',
+        title: `${label} is slowed`,
+        tone: {
+          label: 'Elevated',
+          color: '#9a6700',
+          background: '#fff6e0',
+          accent: '#C2410C',
+          intro: '',
+        },
+        intro:
+          'Memory, disk, CPU, or the payment-service event loop is above its usual line. Calls continue at a slower pace. Customers already accepted are unchanged, and waiting customers are not marked failed.',
+        next: 'This notice is sent once for this rise. A separate email is sent if the host reaches a pause line, and another when every signal is back in the usual range.',
+      };
     case 'host_paused':
       return {
         subjectEvent: 'Paused — host under pressure',
@@ -449,7 +488,7 @@ function progressCopy(payload: BatchProgressEmail): ProgressCopy {
           intro: '',
         },
         intro:
-          'New payment calls are held because the payment host is above its memory, disk, CPU, or event-loop limit. Customers already accepted are unchanged, and waiting customers are not marked failed.',
+          'New payment calls are held because memory, disk, CPU, or the payment-service event loop has reached its pause line. The readings are below. Customers already accepted are unchanged, and waiting customers are not marked failed.',
         next: 'This notice is sent once for this pause. Calls are checked again shortly and resume on their own when the host is back in range. A separate email is sent when processing resumes.',
       };
     case 'host_resumed':
@@ -469,6 +508,44 @@ function progressCopy(payload: BatchProgressEmail): ProgressCopy {
         next: 'This notice is sent once for this recovery. The completion report is sent when the batch finishes.',
       };
   }
+}
+
+function readingLines(payload: BatchProgressEmail): string[] {
+  const rows = payload.readings ?? [];
+  if (!rows.length) return [];
+  return ['', 'Host readings:', ...rows.map((row) => `- ${row.label}: ${row.value} (${row.status})`)];
+}
+
+function readingsHtml(payload: BatchProgressEmail): string {
+  const rows = payload.readings ?? [];
+  if (!rows.length) return '';
+  const body = rows
+    .map((row) => {
+      const color = row.status === 'Pause' ? '#9b1c1c' : row.status === 'Elevated' ? '#9a6700' : '#0f6b4c';
+      return `
+                <tr>
+                  <td style="padding:10px 12px;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#3f564c;border-bottom:1px solid #e2ebe6;">${escapeHtml(row.label)}</td>
+                  <td style="padding:10px 12px;font-family:Georgia,'Times New Roman',serif;font-size:16px;color:#12261e;border-bottom:1px solid #e2ebe6;">${escapeHtml(row.value)}</td>
+                  <td style="padding:10px 12px;font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:${color};border-bottom:1px solid #e2ebe6;">${escapeHtml(row.status)}</td>
+                </tr>`;
+    })
+    .join('');
+  return `
+          <tr>
+            <td style="padding:18px 32px 0 32px;">
+              <div style="font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:#5b7168;margin-bottom:10px;">
+                Host readings
+              </div>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #e2ebe6;border-radius:8px;">
+                <tr>
+                  <td style="padding:8px 12px;font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#5b7168;border-bottom:1px solid #e2ebe6;">Signal</td>
+                  <td style="padding:8px 12px;font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#5b7168;border-bottom:1px solid #e2ebe6;">Reading</td>
+                  <td style="padding:8px 12px;font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#5b7168;border-bottom:1px solid #e2ebe6;">Range</td>
+                </tr>
+                ${body}
+              </table>
+            </td>
+          </tr>`;
 }
 
 export function buildProgressMail(
@@ -505,6 +582,7 @@ export function buildProgressMail(
         ]
       : [`Accepted: ${payload.success}`, `Failed: ${payload.failed}`, `Remaining: ${payload.remaining}`]),
     ...(cause ? [`Signal: ${cause}`] : []),
+    ...readingLines(payload),
     ...(resumesAt ? [`Resumes: ${resumesAt}`] : []),
     `Reported: ${generatedAt}`,
     '',
@@ -595,6 +673,7 @@ export function buildProgressMail(
               </table>
             </td>
           </tr>
+          ${readingsHtml(payload)}
           <tr>
             <td style="padding:18px 32px 8px 32px;">
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f7faf8;border-left:3px solid ${copy.tone.accent};border-radius:4px;">
@@ -641,8 +720,10 @@ function failureLines(payload: BatchCompletionEmail): string[] {
     const trace = row.traceId || 'no trace yet';
     const invoice = row.invoiceId ? ` invoice ${row.invoiceId}` : '';
     const order = row.orderId ? ` order ${row.orderId}` : '';
+    const provider = row.paymentGatewayProvider ? ` ${row.paymentGatewayProvider}` : '';
+    const invoiceStatus = row.invoiceStatus ? ` invStatus ${row.invoiceStatus}` : '';
     lines.push(
-      `- ${row.customerId}  ${row.status || 'FAILED'}  ${row.responseCode || 'NO_CODE'}  ${row.reason}${invoice}${order}  ${trace}`,
+      `- ${row.customerId}  ${row.status || 'FAILED'}  ${row.responseCode || 'NO_CODE'}  ${row.reason}${provider}${invoice}${order}${invoiceStatus}  ${trace}`,
     );
   }
   if (payload.failed > rows.length) {
@@ -660,9 +741,12 @@ function failureSampleHtml(payload: BatchCompletionEmail): string {
                 <tr>
                   <td style="padding:8px 10px;font-family:Consolas,Menlo,monospace;font-size:12px;color:#12261e;border-bottom:1px solid #e2ebe6;">${escapeHtml(row.customerId)}</td>
                   <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#12261e;border-bottom:1px solid #e2ebe6;">${escapeHtml(row.status || 'FAILED')}</td>
+                  <td style="padding:8px 10px;font-family:Consolas,Menlo,monospace;font-size:11px;color:#3f564c;border-bottom:1px solid #e2ebe6;">${escapeHtml(row.responseCode || '—')}</td>
                   <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#12261e;border-bottom:1px solid #e2ebe6;">${escapeHtml(row.reason)}</td>
+                  <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#3f564c;border-bottom:1px solid #e2ebe6;">${escapeHtml(row.paymentGatewayProvider || '—')}</td>
                   <td style="padding:8px 10px;font-family:Consolas,Menlo,monospace;font-size:11px;color:#3f564c;border-bottom:1px solid #e2ebe6;">${escapeHtml(row.invoiceId || '—')}</td>
                   <td style="padding:8px 10px;font-family:Consolas,Menlo,monospace;font-size:11px;color:#3f564c;border-bottom:1px solid #e2ebe6;">${escapeHtml(row.orderId || '—')}</td>
+                  <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#3f564c;border-bottom:1px solid #e2ebe6;">${escapeHtml(row.invoiceStatus || '—')}</td>
                   <td style="padding:8px 10px;font-family:Consolas,Menlo,monospace;font-size:11px;color:#3f564c;border-bottom:1px solid #e2ebe6;">${escapeHtml(row.traceId || '—')}</td>
                 </tr>`,
     )
@@ -681,9 +765,12 @@ function failureSampleHtml(payload: BatchCompletionEmail): string {
                 <tr>
                   <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#5b7168;border-bottom:1px solid #e2ebe6;">Customer</td>
                   <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#5b7168;border-bottom:1px solid #e2ebe6;">Status</td>
+                  <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#5b7168;border-bottom:1px solid #e2ebe6;">Code</td>
                   <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#5b7168;border-bottom:1px solid #e2ebe6;">Reason</td>
+                  <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#5b7168;border-bottom:1px solid #e2ebe6;">Provider</td>
                   <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#5b7168;border-bottom:1px solid #e2ebe6;">Invoice</td>
                   <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#5b7168;border-bottom:1px solid #e2ebe6;">Order</td>
+                  <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#5b7168;border-bottom:1px solid #e2ebe6;">Inv. status</td>
                   <td style="padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#5b7168;border-bottom:1px solid #e2ebe6;">Trace ID</td>
                 </tr>
                 ${body}

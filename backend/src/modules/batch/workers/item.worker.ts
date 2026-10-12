@@ -6,7 +6,7 @@ import { logger } from '../../../common/logger/logger.js';
 import { batchAnchorDay } from '../../../common/time/ist.js';
 import { toJsonSafe } from '../../../common/utils/parse-size.js';
 import { paymentResultRecord } from '../../../infrastructure/payment/retry-policy.js';
-import { currentPressure, HOST_PRESSURE_DEFER_MS } from '../../../infrastructure/payment/host-pressure.js';
+import { currentPressure, hostReadings, HOST_PRESSURE_DEFER_MS } from '../../../infrastructure/payment/host-pressure.js';
 import { buildSingleCustomerPayload } from '../../../infrastructure/payment/payload.js';
 import { paymentClient } from '../../../infrastructure/payment/index.js';
 import type { PaymentResponse } from '../../../infrastructure/payment/types.js';
@@ -42,6 +42,8 @@ function waitingStatus(retryCount: number): ItemStatus {
 function paymentServiceAnswered(response: PaymentResponse): boolean {
   return (
     response.responseCode !== 'PAYMENT_SERVICE_UNAVAILABLE' &&
+    response.responseCode !== 'PAYMENT_SERVICE_SETTLING' &&
+    response.responseCode !== 'GATEWAY_TIMEOUT' &&
     response.responseCode !== 'PAYMENT_SLOT_BUSY' &&
     response.responseCode !== 'INVALID_PAYLOAD'
   );
@@ -53,12 +55,13 @@ async function notifyProgress(input: {
   uploadedBy: string;
   total: number;
   episode: 'payment' | 'peak' | 'host';
-  next: 'down' | 'up' | 'paused' | 'running';
+  next: 'down' | 'up' | 'paused' | 'running' | 'watch' | 'settling';
   cause?: string;
   resumesAt?: Date;
   customerId?: string;
   responseCode?: string;
   traceId?: string;
+  readings?: Array<{ label: string; value: string; status: string }>;
 }): Promise<void> {
   await notifyBatchEpisode(input);
 }
@@ -128,8 +131,23 @@ export async function processBatchItem(
       dayEndBufferMs: env.INVOICE_DAY_END_BUFFER_MS,
     });
 
+    let hostLevel: 'ok' | 'slow' | 'pause' = 'ok';
     if (before.action === 'call' && remoteGuards) {
       const pressure = await currentPressure(now.getTime());
+      hostLevel = pressure.level;
+      if (pressure.level === 'pause' || pressure.level === 'slow') {
+        const readings = hostReadings(pressure.sample);
+        await notifyProgress({
+          batchId: item.batchId,
+          module,
+          uploadedBy: item.batch.uploadedBy,
+          total: item.batch.totalRecords,
+          episode: 'host',
+          next: pressure.level === 'pause' ? 'paused' : 'watch',
+          cause: pressure.reasons.join(', ') || 'host above the usual line',
+          readings,
+        });
+      }
       if (pressure.level === 'pause') {
         before = {
           action: 'defer',
@@ -158,18 +176,6 @@ export async function processBatchItem(
           resumesAt: new Date(now.getTime() + before.delayMs),
         });
       }
-      if (before.reason === 'HOST_PRESSURE') {
-        const pressure = await currentPressure(now.getTime());
-        await notifyProgress({
-          batchId: item.batchId,
-          module,
-          uploadedBy: item.batch.uploadedBy,
-          total: item.batch.totalRecords,
-          episode: 'host',
-          next: 'paused',
-          cause: pressure.reasons.join(', '),
-        });
-      }
       scheduleBatchChanged(item.batchId);
       return;
     }
@@ -183,14 +189,16 @@ export async function processBatchItem(
         episode: 'peak',
         next: 'running',
       });
-      await notifyProgress({
-        batchId: item.batchId,
-        module,
-        uploadedBy: item.batch.uploadedBy,
-        total: item.batch.totalRecords,
-        episode: 'host',
-        next: 'running',
-      });
+      if (hostLevel === 'ok') {
+        await notifyProgress({
+          batchId: item.batchId,
+          module,
+          uploadedBy: item.batch.uploadedBy,
+          total: item.batch.totalRecords,
+          episode: 'host',
+          next: 'running',
+        });
+      }
     }
 
     if (before.action === 'fail') {
@@ -199,6 +207,33 @@ export async function processBatchItem(
     }
 
     const traceId = randomUUID();
+    if (remoteGuards && paymentClient.recoveryHold) {
+      const hold = await paymentClient.recoveryHold(traceId);
+      if (hold) {
+        await batchRepository.updateItem(itemId, { status: waitingStatus(item.retryCount) });
+        await batchService.requeueItem(itemId, hold.delayMs, module);
+        queueConsumeCounter.inc({ queue: queueName, result: 'deferred' });
+        logger.info(
+          { itemId: payload.batchItemId, delayMs: hold.delayMs, reason: hold.reason },
+          'Deferred payment call',
+        );
+        await notifyProgress({
+          batchId: item.batchId,
+          module,
+          uploadedBy: item.batch.uploadedBy,
+          total: item.batch.totalRecords,
+          episode: 'payment',
+          next: hold.reason === 'PAYMENT_SERVICE_SETTLING' ? 'settling' : 'down',
+          cause: hold.reason,
+          resumesAt: new Date(Date.now() + hold.delayMs),
+          customerId: item.customerId,
+          traceId,
+        });
+        scheduleBatchChanged(item.batchId);
+        return;
+      }
+    }
+
     const retryNo = item.retryCount;
 
     await batchRepository.updateItem(itemId, {
@@ -304,16 +339,17 @@ export async function processBatchItem(
         { itemId: payload.batchItemId, delayMs: after.delayMs, reason: after.reason },
         'Deferred payment call',
       );
-      if (after.reason === 'PAYMENT_SERVICE_UNAVAILABLE') {
-        const cause = typeof response.body.cause === 'string' ? response.body.cause : 'HTTP_502';
+      if (after.reason === 'PAYMENT_SERVICE_UNAVAILABLE' || after.reason === 'PAYMENT_SERVICE_SETTLING') {
+        const cause = typeof response.body.cause === 'string' ? response.body.cause : after.reason;
         await notifyProgress({
           batchId: item.batchId,
           module,
           uploadedBy: item.batch.uploadedBy,
           total: item.batch.totalRecords,
           episode: 'payment',
-          next: 'down',
+          next: after.reason === 'PAYMENT_SERVICE_SETTLING' ? 'settling' : 'down',
           cause,
+          resumesAt: new Date(Date.now() + after.delayMs),
           customerId: item.customerId,
           responseCode: response.responseCode,
           traceId,

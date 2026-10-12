@@ -45,7 +45,8 @@ Not retried (`retryable: false`). The item is failed once:
 A dropped connection, a timeout, or HTTP 5xx with no `retryable` field (a proxy `502` is the usual case) is checked with `GET /payment-service/api/v2/healthCheck`.
 
 - Health returns HTTP 200 and `{ "status": "UP" }`: the process is serving, so the customer is retried on the normal schedule and the attempt counts toward `MAX_RETRY`.
-- Health is not `UP`, or the probe itself fails: the customer is queued again after 30 seconds. That wait does not use a retry, so an outage cannot fail the row after three attempts.
+- Health is not `UP`, or the probe itself fails: the customer is queued again after 30 seconds. That wait does not use a retry, so an outage cannot fail the row after three attempts. One email is sent for the outage.
+- The first health check that returns `UP` after that outage waits `PAYMENT_RECOVER_SETTLE_MS` (default 60 seconds) before the next invoice or charge call, so payment-service can finish loading configuration. That wait does not use a retry. One email says calls are waiting, and another is sent when the first call gets through.
 
 HTTP 429 is payment-service's rate limit (25,000 requests per IP per minute). The customer is queued again for the `Retry-After` time, or 62 seconds when that header is missing. That wait does not use a retry, and every worker drops to one call at a time until the window passes. A bare HTTP 400 without the flag is not retried. A body that already sets `retryable` is followed as-is and is not sent to the health check. The health probe is cached for 5 seconds so a burst of failures shares one `GET /payment-service/api/v2/healthCheck`.
 
@@ -78,8 +79,11 @@ Samples are shared through Redis and refreshed about every 15 seconds. A failed 
 | Disk | 85% | 92% |
 | CPU | 75% | 90% |
 | Event-loop lag | 250ms | 1s |
+| Payment-service memory | 1024 MB | 1536 MB |
 
-Slow cuts in-flight calls to half the ceiling (4 when the ceiling is 8) and opens the gap to at least 500ms. Pause queues each customer again after 30 seconds and does not use a retry. Calls resume on their own when every signal is back under the slow line. One email is sent when the pause starts, and one when it clears. Set `HOST_PRESSURE=false` to keep the normal pace. The current board (about 57% memory, 28% disk, 32% CPU) is under these lines, so it does not slow or pause.
+Slow cuts in-flight calls to half the ceiling and opens the gap to at least 500ms. One email is sent when a signal rises above its usual line, with memory, disk, CPU, event-loop, and payment-service readings. Pause queues each customer again after 30 seconds and does not use a retry, and sends one email with the same readings. Calls resume on their own when every signal is back under the slow line, and one email is sent when that happens. Set `HOST_PRESSURE=false` to keep the normal pace.
+
+Payment-service RSS is watched on its own because a charge batch can take that process from under 1 GB to more than 20 GB in a few minutes. The host percentage stays ordinary until the process is already near the full machine. A 502 or 504 while health is still UP holds that customer for 90 seconds and does not use a retry, so the same charge is not sent again while the first gateway call may still be running inside payment-service.
 
 Calls per second is the smaller of:
 

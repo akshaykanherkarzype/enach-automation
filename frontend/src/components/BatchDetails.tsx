@@ -44,6 +44,7 @@ import {
 } from '../lib/batch';
 import { useSocketStatus } from '../realtime/batchSocket';
 import { CopyableText } from './CopyableText';
+import { HostMetrics } from './HostMetrics';
 import { StatusChip } from './StatusChip';
 
 function responseField(raw: unknown, key: 'invoiceId' | 'orderId'): string {
@@ -301,6 +302,8 @@ export function BatchDetails({ batchId, moduleKey }: Props) {
           {error}
         </Alert>
       )}
+
+      {live && <HostMetrics />}
 
       <Box className="progress-card">
         <Stack direction="row" justifyContent="space-between" alignItems="baseline" sx={{ mb: 1 }}>
