@@ -7,6 +7,7 @@ import { batchAnchorDay } from '../../../common/time/ist.js';
 import { toJsonSafe } from '../../../common/utils/parse-size.js';
 import { paymentResultRecord } from '../../../infrastructure/payment/retry-policy.js';
 import { currentPressure, hostReadings, HOST_PRESSURE_DEFER_MS } from '../../../infrastructure/payment/host-pressure.js';
+import { gatewayHoldRemaining } from '../../../infrastructure/payment/gateway-hold.js';
 import { buildSingleCustomerPayload } from '../../../infrastructure/payment/payload.js';
 import { paymentClient } from '../../../infrastructure/payment/index.js';
 import type { PaymentResponse } from '../../../infrastructure/payment/types.js';
@@ -157,6 +158,17 @@ export async function processBatchItem(
       }
     }
 
+    if (before.action === 'call' && remoteGuards) {
+      const holdMs = await gatewayHoldRemaining(now.getTime());
+      if (holdMs > 0) {
+        before = {
+          action: 'defer',
+          delayMs: holdMs,
+          reason: 'GATEWAY_TIMEOUT',
+        };
+      }
+    }
+
     if (before.action === 'defer') {
       await batchRepository.updateItem(itemId, { status: waitingStatus(item.retryCount) });
       await batchService.requeueItem(itemId, before.delayMs, module);
@@ -173,6 +185,17 @@ export async function processBatchItem(
           total: item.batch.totalRecords,
           episode: 'peak',
           next: 'paused',
+          resumesAt: new Date(now.getTime() + before.delayMs),
+        });
+      } else if (before.reason === 'GATEWAY_TIMEOUT') {
+        await notifyProgress({
+          batchId: item.batchId,
+          module,
+          uploadedBy: item.batch.uploadedBy,
+          total: item.batch.totalRecords,
+          episode: 'payment',
+          next: 'down',
+          cause: 'GATEWAY_TIMEOUT',
           resumesAt: new Date(now.getTime() + before.delayMs),
         });
       }
@@ -339,7 +362,11 @@ export async function processBatchItem(
         { itemId: payload.batchItemId, delayMs: after.delayMs, reason: after.reason },
         'Deferred payment call',
       );
-      if (after.reason === 'PAYMENT_SERVICE_UNAVAILABLE' || after.reason === 'PAYMENT_SERVICE_SETTLING') {
+      if (
+        after.reason === 'PAYMENT_SERVICE_UNAVAILABLE' ||
+        after.reason === 'PAYMENT_SERVICE_SETTLING' ||
+        after.reason === 'GATEWAY_TIMEOUT'
+      ) {
         const cause = typeof response.body.cause === 'string' ? response.body.cause : after.reason;
         await notifyProgress({
           batchId: item.batchId,

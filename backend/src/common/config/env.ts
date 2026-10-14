@@ -79,6 +79,8 @@ const envSchema = z.object({
     .transform((v) => v === undefined || v === '' || v === 'true' || v === '1'),
   /** After health returns UP, wait before the next invoice or charge call. */
   PAYMENT_RECOVER_SETTLE_MS: z.coerce.number().min(0).default(60_000),
+  /** One 502, 503, 504, or client timeout stops invoice and charge calls for this long. */
+  GATEWAY_OUTAGE_HOLD_MS: z.coerce.number().min(1_000).default(300_000),
   HOST_PRESSURE: z
     .string()
     .optional()
@@ -87,12 +89,12 @@ const envSchema = z.object({
     .string()
     .default('https://monitoring.respo.co.in/api/datasources/proxy/uid/ef4nzsqdakgsge'),
   HOST_METRICS_INSTANCE: z.string().default('respo-prod'),
-  HOST_MEM_SLOW: z.coerce.number().min(1).max(100).default(80),
-  HOST_MEM_PAUSE: z.coerce.number().min(1).max(100).default(90),
+  HOST_MEM_SLOW: z.coerce.number().min(1).max(100).default(60),
+  HOST_MEM_PAUSE: z.coerce.number().min(1).max(100).default(70),
   HOST_DISK_SLOW: z.coerce.number().min(1).max(100).default(85),
   HOST_DISK_PAUSE: z.coerce.number().min(1).max(100).default(92),
-  HOST_CPU_SLOW: z.coerce.number().min(1).max(100).default(75),
-  HOST_CPU_PAUSE: z.coerce.number().min(1).max(100).default(90),
+  HOST_CPU_SLOW: z.coerce.number().min(1).max(100).default(60),
+  HOST_CPU_PAUSE: z.coerce.number().min(1).max(100).default(70),
   HOST_EVENT_LOOP_SLOW_MS: z.coerce.number().min(1).default(250),
   HOST_EVENT_LOOP_PAUSE_MS: z.coerce.number().min(1).default(1_000),
   /** payment-service RSS. Idle on respo-prod is about 700 MB. 1.5 GB pauses before the process fills the host. */

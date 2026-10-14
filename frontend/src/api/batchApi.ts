@@ -152,3 +152,19 @@ export async function getHostMetrics() {
   const { data } = await api.get('/host/metrics');
   return data as HostSnapshot;
 }
+
+export interface InvoiceCancelEligibility {
+  day: string;
+  allowed: boolean;
+  batchesToday: number;
+}
+
+export async function getInvoiceCancelEligibility() {
+  const { data } = await api.get('/invoice-generation/cancel-unpaid');
+  return data as InvoiceCancelEligibility;
+}
+
+export async function cancelOldUnpaidInvoices() {
+  const { data } = await api.post('/invoice-generation/cancel-unpaid');
+  return data as { day: string; message: string; providerResponses: unknown[] };
+}

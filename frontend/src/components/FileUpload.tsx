@@ -1,11 +1,24 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Alert, Box, Button, Chip, Stack, Typography } from '@mui/material';
+import {
+  Alert,
+  Box,
+  Button,
+  Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
+  Stack,
+  Typography,
+} from '@mui/material';
 import CloudUploadOutlinedIcon from '@mui/icons-material/CloudUploadOutlined';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { BatchModuleSlug, ValidationSummary } from '../api/batchApi';
-import { confirmUpload, uploadFile } from '../api/batchApi';
+import { cancelOldUnpaidInvoices, confirmUpload, getInvoiceCancelEligibility, uploadFile } from '../api/batchApi';
 import { useAuth } from '../auth/AuthContext';
 import { apiMessage, formatCount, isBatchLive } from '../lib/batch';
+import { startConfirmCopy } from '../lib/startConfirm';
 import { CopyableText } from './CopyableText';
 import { useBatchList } from './BatchHistory';
 
@@ -21,6 +34,9 @@ export function FileUpload({ module, onBatchCreated }: Props) {
   const [summary, setSummary] = useState<ValidationSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [confirmStart, setConfirmStart] = useState(false);
+  const [confirmCancelInvoices, setConfirmCancelInvoices] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const canUpload = hasRole('UPLOAD');
   const running = useBatchList(module, 1);
@@ -29,6 +45,14 @@ export function FileUpload({ module, onBatchCreated }: Props) {
       ? running.data?.items.find((batch) => isBatchLive(batch.status))
       : running.data.openBatch;
   const uploadBlocked = Boolean(openBatch);
+  const cancelEligibility = useQuery({
+    queryKey: ['invoice-cancel-eligibility'],
+    queryFn: getInvoiceCancelEligibility,
+    enabled: module === 'invoice-generation' && canUpload,
+    refetchInterval: 30_000,
+  });
+  const showCancelOld =
+    module === 'invoice-generation' && canUpload && cancelEligibility.data?.allowed === true && !summary;
 
   useEffect(() => {
     setSummary(null);
@@ -66,7 +90,9 @@ export function FileUpload({ module, onBatchCreated }: Props) {
     try {
       const batch = await confirmUpload(module, summary.uploadToken);
       setSummary(null);
+      setConfirmStart(false);
       await queryClient.invalidateQueries({ queryKey: ['batches', module] });
+      await queryClient.invalidateQueries({ queryKey: ['invoice-cancel-eligibility'] });
       onBatchCreated(batch.id);
     } catch (err: unknown) {
       setError(apiMessage(err, 'The batch could not be started.'));
@@ -74,6 +100,26 @@ export function FileUpload({ module, onBatchCreated }: Props) {
       setBusy(false);
     }
   };
+
+  const onCancelOldInvoices = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await cancelOldUnpaidInvoices();
+      setConfirmCancelInvoices(false);
+      setNotice(result.message || 'Old unpaid invoices were cancelled.');
+      await queryClient.invalidateQueries({ queryKey: ['invoice-cancel-eligibility'] });
+    } catch (err: unknown) {
+      setError(apiMessage(err, 'Old unpaid invoices could not be cancelled.'));
+      setConfirmCancelInvoices(false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startCopy = summary
+    ? startConfirmCopy(module, summary.validRecords, summary.originalFilename)
+    : null;
 
   return (
     <Stack spacing={2}>
@@ -118,7 +164,26 @@ export function FileUpload({ module, onBatchCreated }: Props) {
         </Typography>
       </Box>
 
-      {error && <Alert severity="error">{error}</Alert>}
+      {error && !confirmStart && !confirmCancelInvoices && <Alert severity="error">{error}</Alert>}
+      {notice && (
+        <Alert severity="success" onClose={() => setNotice(null)}>
+          {notice}
+        </Alert>
+      )}
+
+      {showCancelOld && (
+        <Alert
+          severity="warning"
+          action={
+            <Button color="inherit" size="small" disabled={busy} onClick={() => setConfirmCancelInvoices(true)}>
+              Cancel old invoices
+            </Button>
+          }
+        >
+          No invoice generation batch has been started for {cancelEligibility.data?.day}. You can cancel unpaid invoices
+          from earlier days before uploading today’s file.
+        </Alert>
+      )}
 
       {summary && (
         <Box className="summary-card">
@@ -161,7 +226,7 @@ export function FileUpload({ module, onBatchCreated }: Props) {
             </Alert>
           )}
           <Stack direction="row" spacing={1}>
-            <Button variant="contained" disabled={busy || summary.validRecords === 0} onClick={() => void onConfirm()}>
+            <Button variant="contained" disabled={busy || summary.validRecords === 0} onClick={() => setConfirmStart(true)}>
               {busy ? 'Starting…' : `Start ${formatCount(summary.validRecords)} customers`}
             </Button>
             <Button variant="text" disabled={busy} onClick={() => setSummary(null)}>
@@ -170,6 +235,44 @@ export function FileUpload({ module, onBatchCreated }: Props) {
           </Stack>
         </Box>
       )}
+
+      <Dialog open={confirmStart} onClose={() => !busy && setConfirmStart(false)}>
+        <DialogTitle>{startCopy?.title}</DialogTitle>
+        <DialogContent>
+          {error && (
+            <Alert severity="error" sx={{ mb: 1.5 }}>
+              {error}
+            </Alert>
+          )}
+          <DialogContentText>{startCopy?.body}</DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button disabled={busy} onClick={() => setConfirmStart(false)}>
+            Go back
+          </Button>
+          <Button variant="contained" disabled={busy} onClick={() => void onConfirm()}>
+            {busy ? 'Starting…' : startCopy?.confirm}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={confirmCancelInvoices} onClose={() => !busy && setConfirmCancelInvoices(false)}>
+        <DialogTitle>Cancel old unpaid invoices?</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            This asks payment-service to cancel unpaid invoices from before today. It does not start a new file. The
+            option is hidden once an invoice generation batch exists for {cancelEligibility.data?.day || 'today'}.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button disabled={busy} onClick={() => setConfirmCancelInvoices(false)}>
+            Keep invoices
+          </Button>
+          <Button color="warning" variant="contained" disabled={busy} onClick={() => void onCancelOldInvoices()}>
+            {busy ? 'Cancelling…' : 'Cancel old invoices'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Stack>
   );
 }

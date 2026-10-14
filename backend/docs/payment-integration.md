@@ -75,15 +75,15 @@ Samples are shared through Redis and refreshed about every 15 seconds. A failed 
 
 | Signal | Slow the batch | Pause calls |
 | --- | --- | --- |
-| Memory | 80% | 90% |
+| Memory | 60% | 70% |
 | Disk | 85% | 92% |
-| CPU | 75% | 90% |
+| CPU | 60% | 70% |
 | Event-loop lag | 250ms | 1s |
 | Payment-service memory | 1024 MB | 1536 MB |
 
-Slow cuts in-flight calls to half the ceiling and opens the gap to at least 500ms. One email is sent when a signal rises above its usual line, with memory, disk, CPU, event-loop, and payment-service readings. Pause queues each customer again after 30 seconds and does not use a retry, and sends one email with the same readings. Calls resume on their own when every signal is back under the slow line, and one email is sent when that happens. Set `HOST_PRESSURE=false` to keep the normal pace.
+Slow cuts in-flight calls to half the ceiling and opens the gap to at least 500ms. These lines are `HOST_MEM_SLOW`, `HOST_MEM_PAUSE`, `HOST_CPU_SLOW`, and `HOST_CPU_PAUSE`. One email is sent when a signal rises above its usual line. Pause queues each customer again after 30 seconds and does not use a retry. Calls resume when every signal is back under the slow line.
 
-Payment-service RSS is watched on its own because a charge batch can take that process from under 1 GB to more than 20 GB in a few minutes. The host percentage stays ordinary until the process is already near the full machine. A 502 or 504 while health is still UP holds that customer for 90 seconds and does not use a retry, so the same charge is not sent again while the first gateway call may still be running inside payment-service.
+A single HTTP 502, 503, or 504, or a client timeout (`API_TIMEOUT`), pauses **both** invoice generation and invoice charge for `GATEWAY_OUTAGE_HOLD_MS` (default 5 minutes). That pause is shared in Redis. Customers already in flight can finish, and no new payment call starts until the window ends. The wait does not use `MAX_RETRY`.
 
 Calls per second is the smaller of:
 

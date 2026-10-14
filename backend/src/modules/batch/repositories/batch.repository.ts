@@ -1,5 +1,6 @@
 import type { BatchModule, BatchStatus, ItemStatus, Prisma } from '@prisma/client';
 import { prisma } from '../../../infrastructure/mysql/prisma.js';
+import { invoiceGenerationDayWhere } from '../services/invoice-day.js';
 
 export const OPEN_BATCH_STATUSES: BatchStatus[] = [
   'UPLOADED',
@@ -22,6 +23,14 @@ export class BatchRepository {
 
   findByIdWithCounts(id: bigint) {
     return prisma.batchExecution.findUnique({ where: { id } });
+  }
+
+  /** Invoice-generation batches whose processing day or upload time falls on an IST day. */
+  invoiceGenerationOnDay(day: string, bounds: { start: Date; end: Date }) {
+    return prisma.batchExecution.findMany({
+      where: invoiceGenerationDayWhere(day, bounds),
+      select: { module: true, processingDay: true, uploadedAt: true, status: true },
+    });
   }
 
   findOpenBatch(module: BatchModule) {

@@ -16,11 +16,12 @@ import {
   interpretPaymentHttpResponse,
   interpretSlotBusy,
   interpretTransportError,
-  isGatewaySaturation,
   isHealthUp,
   needsHealthProbe,
+  pausesFleet,
 } from './retry-policy.js';
 import { PaymentSlotBusyError } from './slot.js';
+import { armGatewayHold } from './gateway-hold.js';
 import type { PaymentClient, PaymentRequest, PaymentResponse } from './types.js';
 
 export type PaceFn = <T>(work: () => Promise<T>) => Promise<T>;
@@ -153,6 +154,14 @@ export class HttpPaymentClient implements PaymentClient {
 
       if (result.latencyMs > 0) this.options.onLatency?.(result.latencyMs);
 
+      if (pausesFleet(result.statusCode, result.responseCode)) {
+        const delayMs = await armGatewayHold();
+        return {
+          ...deferWhileGatewaySaturated(result, delayMs),
+          latencyMs: Date.now() - start,
+        };
+      }
+
       if (result.retryable && needsHealthProbe(result.statusCode, result.body)) {
         const up = await this.paymentServiceIsUp(origin, request.traceId);
         const held = await this.recordProbe(up, Date.now());
@@ -165,12 +174,6 @@ export class HttpPaymentClient implements PaymentClient {
         if (held?.reason === 'PAYMENT_SERVICE_SETTLING') {
           return {
             ...deferWhilePaymentServiceSettles(held.delayMs, result),
-            latencyMs: Date.now() - start,
-          };
-        }
-        if (isGatewaySaturation(result.statusCode)) {
-          return {
-            ...deferWhileGatewaySaturated(result),
             latencyMs: Date.now() - start,
           };
         }
@@ -188,6 +191,13 @@ export class HttpPaymentClient implements PaymentClient {
         latencyMs: Date.now() - start,
       };
       if (transport.latencyMs > 0) this.options.onLatency?.(transport.latencyMs);
+      if (pausesFleet(transport.statusCode, transport.responseCode)) {
+        const delayMs = await armGatewayHold();
+        return {
+          ...deferWhileGatewaySaturated(transport, delayMs),
+          latencyMs: transport.latencyMs,
+        };
+      }
       const up = await this.paymentServiceIsUp(origin, request.traceId);
       const held = await this.recordProbe(up, Date.now());
       if (!up) {

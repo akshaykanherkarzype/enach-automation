@@ -263,26 +263,28 @@ export function deferWhilePaymentServiceDown(previous: Interpreted): Interpreted
   };
 }
 
-/** Nginx returned 502/504 while the process was still up. The first gateway call may still be running. */
-export const GATEWAY_SATURATED_DEFER_MS = 90_000;
-
+/** Nginx or the client timed out. Invoice and charge both stop for GATEWAY_OUTAGE_HOLD_MS. */
 export function isGatewaySaturation(statusCode: number): boolean {
-  return statusCode === 502 || statusCode === 504;
+  return statusCode === 502 || statusCode === 503 || statusCode === 504;
 }
 
-export function deferWhileGatewaySaturated(previous: Interpreted): Interpreted {
+export function pausesFleet(statusCode: number, responseCode: string): boolean {
+  return isGatewaySaturation(statusCode) || responseCode === 'TIMEOUT';
+}
+
+export function deferWhileGatewaySaturated(previous: Interpreted, delayMs: number): Interpreted {
   const cause = previous.responseCode || `HTTP_${previous.statusCode}`;
   return {
     success: false,
     retryable: false,
     deferred: true,
-    deferDelayMs: GATEWAY_SATURATED_DEFER_MS,
+    deferDelayMs: Math.max(1_000, delayMs),
     statusCode: previous.statusCode,
     responseCode: 'GATEWAY_TIMEOUT',
     body: {
       cause,
       message:
-        'The gateway timed out while payment-service was still up. This customer is held so the same charge is not sent again while the first call may still be running.',
+        'A gateway timeout paused every invoice and charge call. This customer is held until that pause ends.',
     },
   };
 }

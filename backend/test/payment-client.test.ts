@@ -344,7 +344,7 @@ test('http client posts one customer and honors success, retryable, and socket e
   assert.equal(failed.retryable, false);
   assert.equal(failed.deferred, true);
   assert.equal(failed.responseCode, 'GATEWAY_TIMEOUT');
-  assert.equal(failed.deferDelayMs, 90_000);
+  assert.ok((failed.deferDelayMs ?? 0) >= 60_000);
 
   const permanent = new HttpPaymentClient({
     baseUrl: 'http://payment.test',
@@ -433,7 +433,7 @@ test('http client posts one customer and honors success, retryable, and socket e
   assert.equal(calls.length, 1);
 });
 
-test('a 502 while healthCheck is down is deferred and does not use a retry', async () => {
+test('a 502 pauses invoice and charge calls and does not use a retry', async () => {
   const calls: string[] = [];
   const client = new HttpPaymentClient({
     baseUrl: 'http://payment.test',
@@ -441,9 +441,6 @@ test('a 502 while healthCheck is down is deferred and does not use a retry', asy
     pace: async (work) => work(),
     fetchFn: async (url) => {
       calls.push(String(url));
-      if (String(url).endsWith(HEALTH_PATH)) {
-        return new Response('bad gateway', { status: 502 });
-      }
       return new Response('upstream', { status: 502 });
     },
   });
@@ -458,16 +455,13 @@ test('a 502 while healthCheck is down is deferred and does not use a retry', asy
     traceId: 'trace-2',
   });
 
-  assert.deepEqual(calls, [
-    'http://payment.test/payment-service/api/v2/upi/autopay/charge',
-    `http://payment.test${HEALTH_PATH}`,
-  ]);
+  assert.deepEqual(calls, ['http://payment.test/payment-service/api/v2/upi/autopay/charge']);
   assert.equal(down.success, false);
   assert.equal(down.retryable, false);
   assert.equal(down.deferred, true);
-  assert.equal(down.deferDelayMs, HEALTH_DEFER_MS);
+  assert.ok((down.deferDelayMs ?? 0) >= 60_000);
   assert.equal(down.statusCode, 502);
-  assert.equal(down.responseCode, 'PAYMENT_SERVICE_UNAVAILABLE');
+  assert.equal(down.responseCode, 'GATEWAY_TIMEOUT');
   assert.equal(down.body.cause, 'HTTP_502');
 
   assert.equal(needsHealthProbe(502, { message: 'upstream' }), true);
@@ -569,7 +563,7 @@ test('a burst of failures shares one healthCheck', async () => {
       if (String(url).endsWith(HEALTH_PATH)) {
         return new Response(JSON.stringify({ status: 'DOWN' }), { status: 503 });
       }
-      return new Response('upstream', { status: 502 });
+      return new Response('upstream', { status: 500 });
     },
   });
 
