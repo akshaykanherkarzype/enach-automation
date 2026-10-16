@@ -6,7 +6,7 @@ import {
   buildProgressMail,
   buildSmtpTransportOptions,
 } from '../src/infrastructure/email/content.js';
-import { shouldNotifyTransition } from '../src/modules/batch/services/progress-notice.service.js';
+import { mayAnnouncePaymentRecovery, shouldNotifyTransition } from '../src/modules/batch/services/progress-notice.service.js';
 
 const base = {
   to: 'ops@getzype.com',
@@ -145,6 +145,8 @@ test('progress notices are sent once per outage or peak window and show remainin
   assert.equal(shouldNotifyTransition('settling', 'up'), true);
   assert.equal(shouldNotifyTransition(null, 'settling'), false);
   assert.equal(shouldNotifyTransition(null, 'running'), false);
+  assert.equal(mayAnnouncePaymentRecovery(0), true);
+  assert.equal(mayAnnouncePaymentRecovery(300_000), false);
 
   const paused = buildProgressMail({
     to: 'ops@getzype.com',

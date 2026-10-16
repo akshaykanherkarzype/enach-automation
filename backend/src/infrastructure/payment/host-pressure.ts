@@ -209,6 +209,16 @@ export function eventLoopLagMs(metricsText: string): number | undefined {
 }
 
 /**
+ * Payment-service memory above its slow line uses the slowest pace: one call
+ * and the widest gap. The customer is still called until the pause line.
+ */
+export function paceLevelForPressure(decision: PressureDecision): PressureLevel {
+  if (decision.level === 'pause') return 'pause';
+  if (decision.reasons.some((reason) => reason.startsWith('payment service'))) return 'pause';
+  return decision.level;
+}
+
+/**
  * Slow: half the ceiling, gap at least 500ms. Pause: one call and the widest gap.
  * Never raises a budget that latency or a rate limit already cut.
  */

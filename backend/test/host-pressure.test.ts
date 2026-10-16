@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   applyPressureToBudget,
   classifyPressure,
+  paceLevelForPressure,
   eventLoopLagMs,
   hostReadings,
   presentHost,
@@ -58,7 +59,11 @@ test('a high host signal slows the batch, and a critical one pauses it', () => {
 test('payment-service memory pauses calls while the host still looks ordinary', () => {
   const rising = classifyPressure({ memoryPct: 45, diskPct: 20, cpuPct: 26, paymentRssMb: 1100 }, thresholds);
   assert.equal(rising.level, 'slow');
+  assert.equal(paceLevelForPressure(rising), 'pause');
   assert.deepEqual(rising.reasons, ['payment service 1100 MB']);
+  const crawl = applyPressureToBudget({ inFlight: 8, gapMs: 125 }, paceLevelForPressure(rising), limits);
+  assert.equal(crawl.inFlight, 1);
+  assert.equal(crawl.gapMs, 2_000);
 
   const full = classifyPressure({ memoryPct: 45, diskPct: 20, cpuPct: 26, paymentRssMb: 1800 }, thresholds);
   assert.equal(full.level, 'pause');

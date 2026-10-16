@@ -1,7 +1,8 @@
 import { env } from '../../common/config/env.js';
 import { logger } from '../../common/logger/logger.js';
 import { redis } from '../redis/client.js';
-import { applyPressureToBudget, currentPressure } from './host-pressure.js';
+import { gatewayHoldRemaining } from './gateway-hold.js';
+import { applyPressureToBudget, currentPressure, paceLevelForPressure } from './host-pressure.js';
 
 const STATE_KEY = 'lock:payment:pace';
 const RATE_HOLD_KEY = 'lock:payment:rate-hold';
@@ -186,10 +187,20 @@ async function selectPaceBudget(): Promise<PaceBudget> {
 
 export async function loadPaceBudget(): Promise<PaceBudget> {
   const budget = await selectPaceBudget();
+  const limits = adaptiveConfigFromEnv();
+  if (env.PAYMENT_CLIENT === 'http') {
+    try {
+      if ((await gatewayHoldRemaining()) > 0) {
+        return applyPressureToBudget(budget, 'pause', limits);
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Gateway hold did not change the pace');
+    }
+  }
   if (!env.hostPressure || env.PAYMENT_CLIENT !== 'http') return budget;
   try {
     const pressure = await currentPressure();
-    return applyPressureToBudget(budget, pressure.level, adaptiveConfigFromEnv());
+    return applyPressureToBudget(budget, paceLevelForPressure(pressure), limits);
   } catch (err) {
     logger.warn({ err }, 'Host pressure did not change the pace');
     return budget;

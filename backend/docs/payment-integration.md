@@ -81,9 +81,9 @@ Samples are shared through Redis and refreshed about every 15 seconds. A failed 
 | Event-loop lag | 250ms | 1s |
 | Payment-service memory | 1024 MB | 1536 MB |
 
-Slow cuts in-flight calls to half the ceiling and opens the gap to at least 500ms. These lines are `HOST_MEM_SLOW`, `HOST_MEM_PAUSE`, `HOST_CPU_SLOW`, and `HOST_CPU_PAUSE`. One email is sent when a signal rises above its usual line. Pause queues each customer again after 30 seconds and does not use a retry. Calls resume when every signal is back under the slow line.
+Host memory, disk, and CPU above the slow line cut in-flight calls to half the ceiling and open the gap to at least 500ms. Payment-service memory above 1024 MB drops the pace to one call and the widest gap (the same crawl as a pause) while calls still go out. Above 1536 MB each customer is queued again after 30 seconds. These lines are `HOST_MEM_SLOW`, `HOST_MEM_PAUSE`, `HOST_CPU_SLOW`, `HOST_CPU_PAUSE`, `HOST_PAYMENT_RSS_SLOW_MB`, and `HOST_PAYMENT_RSS_PAUSE_MB`. One email is sent when a signal rises above its usual line. A pause does not use a retry. Calls resume when every signal is back under the slow line.
 
-A single HTTP 502, 503, or 504, or a client timeout (`API_TIMEOUT`), pauses **both** invoice generation and invoice charge for `GATEWAY_OUTAGE_HOLD_MS` (default 5 minutes). That pause is shared in Redis. Customers already in flight can finish, and no new payment call starts until the window ends. The wait does not use `MAX_RETRY`.
+A single HTTP 502, 503, or 504, or a client timeout (`API_TIMEOUT`), pauses **both** invoice generation and invoice charge for `GATEWAY_OUTAGE_HOLD_MS` (default 5 minutes) and keeps the pace at one call with the widest gap for that window. That pause is shared in Redis. Customers already in flight can finish, and no new payment call starts until the window ends. The wait does not use `MAX_RETRY`. The pause mail is sent once for that window. A customer that succeeds while the window is still open does not send a resume mail. One resume mail is sent after the window ends and a later call gets through.
 
 Calls per second is the smaller of:
 
@@ -107,7 +107,7 @@ Peak-hour deferral does not consume a retry. A charge that is not yet 36 hours o
 
 ## Email
 
-Notices go to the uploader and `BATCH_REPORT_EMAIL`. A pause or resume is sent **once per batch per episode**, not once per customer. Redis remembers the episode for 48 hours. If sending fails, the claim is released so a later customer can send it.
+Notices go to the uploader and `BATCH_REPORT_EMAIL`. A pause is sent once for that outage, and a resume is sent once after it ends, not once per customer and not again while the same gateway hold is still open. Redis remembers the episode for 48 hours. If sending fails, the claim is released so a later customer can send it.
 
 | When | Subject | What it reports |
 | --- | --- | --- |

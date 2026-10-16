@@ -23,7 +23,7 @@ import { scheduleBatchChanged } from '../../../infrastructure/realtime/batch-eve
 import { batchRepository } from '../repositories/batch.repository.js';
 import { batchService } from '../services/batch.service.js';
 import { lockService } from '../services/lock.service.js';
-import { notifyBatchEpisode } from '../services/progress-notice.service.js';
+import { mayAnnouncePaymentRecovery, notifyBatchEpisode } from '../services/progress-notice.service.js';
 import { planAfterResponse, planBeforeCall } from './attempt-plan.js';
 
 function apiNameForModule(module: BatchModule): string {
@@ -48,6 +48,13 @@ function paymentServiceAnswered(response: PaymentResponse): boolean {
     response.responseCode !== 'PAYMENT_SLOT_BUSY' &&
     response.responseCode !== 'INVALID_PAYLOAD'
   );
+}
+
+async function notifyPaymentRecovered(
+  input: Omit<Parameters<typeof notifyProgress>[0], 'episode' | 'next'>,
+): Promise<void> {
+  if (!mayAnnouncePaymentRecovery(await gatewayHoldRemaining())) return;
+  await notifyProgress({ ...input, episode: 'payment', next: 'up' });
 }
 
 async function notifyProgress(input: {
@@ -338,13 +345,11 @@ export async function processBatchItem(
       });
       queueConsumeCounter.inc({ queue: queueName, result: 'success' });
       if (remoteGuards) {
-        await notifyProgress({
+        await notifyPaymentRecovered({
           batchId: item.batchId,
           module,
           uploadedBy: item.batch.uploadedBy,
           total: item.batch.totalRecords,
-          episode: 'payment',
-          next: 'up',
           customerId: item.customerId,
           responseCode: response.responseCode,
           traceId,
@@ -382,13 +387,11 @@ export async function processBatchItem(
           traceId,
         });
       } else if (remoteGuards && paymentServiceAnswered(response)) {
-        await notifyProgress({
+        await notifyPaymentRecovered({
           batchId: item.batchId,
           module,
           uploadedBy: item.batch.uploadedBy,
           total: item.batch.totalRecords,
-          episode: 'payment',
-          next: 'up',
           customerId: item.customerId,
           responseCode: response.responseCode,
           traceId,
@@ -415,13 +418,11 @@ export async function processBatchItem(
         'Scheduled retry',
       );
       if (remoteGuards && paymentServiceAnswered(response)) {
-        await notifyProgress({
+        await notifyPaymentRecovered({
           batchId: item.batchId,
           module,
           uploadedBy: item.batch.uploadedBy,
           total: item.batch.totalRecords,
-          episode: 'payment',
-          next: 'up',
           customerId: item.customerId,
           responseCode: response.responseCode,
           traceId,
@@ -432,13 +433,11 @@ export async function processBatchItem(
     }
 
     if (remoteGuards && paymentServiceAnswered(response)) {
-      await notifyProgress({
+      await notifyPaymentRecovered({
         batchId: item.batchId,
         module,
         uploadedBy: item.batch.uploadedBy,
         total: item.batch.totalRecords,
-        episode: 'payment',
-        next: 'up',
         customerId: item.customerId,
         responseCode: response.responseCode,
         traceId,

@@ -14,6 +14,11 @@ const NOTICE_TTL_SECONDS = 48 * 60 * 60;
  * One email per transition. A pause is announced once. A resume is announced
  * only after that pause. A later pause can be announced again.
  */
+/** A success during a gateway hold must not clear the pause mail. One resume follows the hold. */
+export function mayAnnouncePaymentRecovery(holdRemainingMs: number): boolean {
+  return holdRemainingMs <= 0;
+}
+
 export function shouldNotifyTransition(current: string | null, next: NoticeState): boolean {
   const previous = current ?? '';
   if (next === 'down' || next === 'paused') return previous !== next;

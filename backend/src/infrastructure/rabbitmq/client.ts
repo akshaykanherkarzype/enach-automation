@@ -1,11 +1,19 @@
-import amqp, { Channel, ChannelModel, ConsumeMessage } from 'amqplib';
+import amqp, { ConfirmChannel, ChannelModel, ConsumeMessage } from 'amqplib';
 import { env } from '../../common/config/env.js';
 import { logger } from '../../common/logger/logger.js';
 
 export type QueuePayload = { batchItemId: string };
 
 let connection: ChannelModel | null = null;
-let channel: Channel | null = null;
+let channel: ConfirmChannel | null = null;
+
+/** Queue expiry deletes every waiting message and does not dead-letter them. */
+const DELAY_QUEUE_LEASE_MS = 24 * 60 * 60 * 1000;
+
+export function delayQueueSetup(delayMs: number): { ttlMs: number; expiresMs: number } {
+  const ttlMs = Math.max(1, Math.ceil(delayMs));
+  return { ttlMs, expiresMs: ttlMs + DELAY_QUEUE_LEASE_MS };
+}
 
 const QUEUE_CONFIG = {
   durable: true,
@@ -18,7 +26,7 @@ export async function connectRabbitMq(): Promise<Channel> {
   if (channel) return channel;
 
   connection = await amqp.connect(env.RABBITMQ_URL);
-  channel = await connection.createChannel();
+  channel = await connection.createConfirmChannel();
   await channel.prefetch(env.QUEUE_CONCURRENCY);
 
   const queues = [
@@ -45,7 +53,7 @@ export async function connectRabbitMq(): Promise<Channel> {
   return channel;
 }
 
-export function getChannel(): Channel {
+export function getChannel(): ConfirmChannel {
   if (!channel) {
     throw new Error('RabbitMQ channel not initialized');
   }
@@ -57,21 +65,25 @@ export async function publishToQueue(queue: string, payload: QueuePayload, delay
   const content = Buffer.from(JSON.stringify(payload));
 
   if (delayMs > 0) {
-    // Use per-message expiration via a temporary delayed queue pattern
-    const delayQueue = `${queue}.delay.${delayMs}`;
+    // One queue per delay so a long wait cannot block a short one.
+    // The lease is a full day past the message TTL. A short lease deletes
+    // the queue and discards messages that have not dead-lettered yet.
+    const delayQueue = `${queue}.delay.${Math.max(1, Math.ceil(delayMs))}`;
+    const { ttlMs, expiresMs } = delayQueueSetup(delayMs);
     await ch.assertQueue(delayQueue, {
       durable: true,
       arguments: {
         'x-dead-letter-exchange': '',
         'x-dead-letter-routing-key': queue,
-        'x-message-ttl': delayMs,
-        'x-expires': delayMs + 60_000,
+        'x-message-ttl': ttlMs,
+        'x-expires': expiresMs,
       },
     });
     ch.sendToQueue(delayQueue, content, {
       persistent: true,
       contentType: 'application/json',
     });
+    await ch.waitForConfirms();
     return;
   }
 
@@ -79,6 +91,7 @@ export async function publishToQueue(queue: string, payload: QueuePayload, delay
     persistent: true,
     contentType: 'application/json',
   });
+  await ch.waitForConfirms();
 }
 
 export async function publishBatch(
@@ -88,6 +101,20 @@ export async function publishBatch(
   for (const id of itemIds) {
     await publishToQueue(queue, { batchItemId: String(id) });
   }
+}
+
+const REQUEUABLE_DB_CODES = new Set(['P1001', 'P1008', 'P1017', 'P2024']);
+
+/** A database outage must put the customer back. Dropping it leaves the row pending forever. */
+export function shouldRequeueHandlerError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err.message.startsWith('Shutting down')) return true;
+  const code = 'code' in err && typeof err.code === 'string' ? err.code : '';
+  if (REQUEUABLE_DB_CODES.has(code)) return true;
+  return (
+    err.message.includes("Can't reach database server") ||
+    err.message.includes('Server has closed the connection')
+  );
 }
 
 export type MessageHandler = (payload: QueuePayload, msg: ConsumeMessage) => Promise<void>;
@@ -107,8 +134,13 @@ export async function consumeQueue(
         await handler(payload, msg);
         ch.ack(msg);
       } catch (err) {
-        logger.error({ err, queue }, 'Consumer handler failed; nacking without requeue');
-        ch.nack(msg, false, false);
+        const requeue = shouldRequeueHandlerError(err);
+        logger.error({ err, queue, requeue }, 'Consumer handler failed');
+        try {
+          ch.nack(msg, false, requeue);
+        } catch (nackErr) {
+          logger.error({ err: nackErr, queue }, 'Failed to nack message');
+        }
       }
     },
     { noAck: false, consumerTag: options?.consumerTag },
